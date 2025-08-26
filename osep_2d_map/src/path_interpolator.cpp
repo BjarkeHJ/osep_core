@@ -334,31 +334,20 @@ std::vector<geometry_msgs::msg::PoseStamped> PathInterpolator::movingAverageFilt
 // Helper: Adjust path for collisions and downsample
 std::vector<geometry_msgs::msg::PoseStamped> PathInterpolator::adjustAndDownsamplePath(
 	const std::vector<geometry_msgs::msg::PoseStamped> &path) {
-	// Reserve space for efficiency
-	std::vector<geometry_msgs::msg::PoseStamped> adjusted_full_path;
-	adjusted_full_path.reserve(path.size());
-
-	// Lambda for validity check
-	auto is_invalid = [](const geometry_msgs::msg::PoseStamped &pose) {
-		return pose.header.frame_id.empty();
-	};
-
-	// Adjust each pose for collision
+	// Shift all poses back by extra_safety_distance_ along -yaw direction
+	std::vector<geometry_msgs::msg::PoseStamped> shifted_path;
+	shifted_path.reserve(path.size());
 	for (const auto &pose : path) {
-		auto [adjusted_pose, was_adjusted] = adjustviewpointForCollision(pose, extra_safety_distance_, costmap_->info.resolution, 3);
-		adjusted_full_path.emplace_back(std::move(adjusted_pose));
+		geometry_msgs::msg::PoseStamped shifted = pose;
+		tf2::Quaternion quat;
+		tf2::fromMsg(pose.pose.orientation, quat);
+		double yaw = tf2::getYaw(quat);
+		shifted.pose.position.x -= extra_safety_distance_ * std::cos(yaw);
+		shifted.pose.position.y -= extra_safety_distance_ * std::sin(yaw);
+		shifted_path.emplace_back(std::move(shifted));
 	}
-
-	// Remove invalid poses and downsample
-	adjusted_full_path.erase(
-		std::remove_if(adjusted_full_path.begin(), adjusted_full_path.end(), is_invalid),
-		adjusted_full_path.end());
-	std::vector<geometry_msgs::msg::PoseStamped> downsampled = downsamplePath(adjusted_full_path, interpolation_distance_);
-	// Apply moving average filter (window size 3)
-	return movingAverageFilter(downsampled, 3);
+	return downsamplePath(shifted_path, interpolation_distance_);
 }
-
-
 
 std::vector<geometry_msgs::msg::PoseStamped> PathInterpolator::planPath(
 	const geometry_msgs::msg::PoseStamped &start,
@@ -490,8 +479,9 @@ std::vector<geometry_msgs::msg::PoseStamped> PathInterpolator::smoothPath(
 	if (path.size() < 2) {
 		return path;
 	}
+	std::vector<geometry_msgs::msg::PoseStamped> average_path = movingAverageFilter(path, 3);
 	std::vector<double> x, y, z, yaw;
-	for (const auto &pose : path) {
+	for (const auto &pose : average_path) {
 		x.push_back(pose.pose.position.x);
 		y.push_back(pose.pose.position.y);
 		z.push_back(pose.pose.position.z);
@@ -518,6 +508,7 @@ std::vector<geometry_msgs::msg::PoseStamped> PathInterpolator::smoothPath(
 	std::vector<double> yaw_smooth = cubicSplineInterp(t, yaw, t_new, true);
 	std::vector<geometry_msgs::msg::PoseStamped> smoothed_path;
 	smoothed_path.push_back(path.front());
+
 	for (size_t i = 1; i < t_new.size(); ++i) {
 		geometry_msgs::msg::PoseStamped pose;
 		pose.header = path.front().header;
