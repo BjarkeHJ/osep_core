@@ -289,18 +289,24 @@ std::vector<geometry_msgs::msg::PoseStamped> PathInterpolator::reconstructPath(
 // Helper: Adjust path for collisions and downsample
 std::vector<geometry_msgs::msg::PoseStamped> PathInterpolator::adjustAndDownsamplePath(
 	const std::vector<geometry_msgs::msg::PoseStamped> &path) {
+	// Reserve space for efficiency
 	std::vector<geometry_msgs::msg::PoseStamped> adjusted_full_path;
+	adjusted_full_path.reserve(path.size());
+
+	// Lambda for validity check
+	auto is_invalid = [](const geometry_msgs::msg::PoseStamped &pose) {
+		return pose.header.frame_id.empty();
+	};
+
+	// Adjust each pose for collision
 	for (const auto &pose : path) {
 		auto [adjusted_pose, was_adjusted] = adjustviewpointForCollision(pose, extra_safety_distance_, costmap_->info.resolution, 3);
-		adjusted_full_path.push_back(adjusted_pose);
+		adjusted_full_path.emplace_back(std::move(adjusted_pose));
 	}
+
+	// Remove invalid poses and downsample
 	adjusted_full_path.erase(
-		std::remove_if(
-			adjusted_full_path.begin(),
-			adjusted_full_path.end(),
-			[](const geometry_msgs::msg::PoseStamped &pose) {
-				return pose.header.frame_id.empty();
-			}),
+		std::remove_if(adjusted_full_path.begin(), adjusted_full_path.end(), is_invalid),
 		adjusted_full_path.end());
 	return downsamplePath(adjusted_full_path, interpolation_distance_);
 }
