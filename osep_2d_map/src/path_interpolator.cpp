@@ -94,44 +94,49 @@ void PathInterpolator::updateGroundTruthTrajectory() {
 }
 
 std::pair<geometry_msgs::msg::PoseStamped, bool> PathInterpolator::adjustviewpointForCollision(
-	const geometry_msgs::msg::PoseStamped &viewpoint, float distance, float resolution, int max_attempts) {
-	geometry_msgs::msg::PoseStamped adjusted_viewpoint = viewpoint;
-	bool was_adjusted = false;
-	if (!costmap_) {
-		RCLCPP_ERROR(this->get_logger(), "Costmap is null");
-		adjusted_viewpoint.header.frame_id = "";
-		return {adjusted_viewpoint, was_adjusted};
-	}
-	tf2::Quaternion quat;
-	tf2::fromMsg(adjusted_viewpoint.pose.orientation, quat);
-	double yaw = tf2::getYaw(quat);
-	for (int attempt = 0; attempt < max_attempts; ++attempt) {
-		int x_index = static_cast<int>((adjusted_viewpoint.pose.position.x - costmap_->info.origin.position.x) / resolution);
-		int y_index = static_cast<int>((adjusted_viewpoint.pose.position.y - costmap_->info.origin.position.y) / resolution);
-		if (x_index >= 0 && x_index < static_cast<int>(costmap_->info.width) &&
-			y_index >= 0 && y_index < static_cast<int>(costmap_->info.height)) {
-			int index = y_index * costmap_->info.width + x_index;
-			if (costmap_->data[index] <= obstacle_threshold_) {
-				geometry_msgs::msg::PoseStamped forward_viewpoint = adjusted_viewpoint;
-				forward_viewpoint.pose.position.x += distance * std::cos(yaw);
-				forward_viewpoint.pose.position.y += distance * std::sin(yaw);
-				int forward_x_index = static_cast<int>((forward_viewpoint.pose.position.x - costmap_->info.origin.position.x) / resolution);
-				int forward_y_index = static_cast<int>((forward_viewpoint.pose.position.y - costmap_->info.origin.position.y) / resolution);
-				if (forward_x_index >= 0 && forward_x_index < static_cast<int>(costmap_->info.width) &&
-					forward_y_index >= 0 && forward_y_index < static_cast<int>(costmap_->info.height)) {
-					int forward_index = forward_y_index * costmap_->info.width + forward_x_index;
-					if (costmap_->data[forward_index] <= obstacle_threshold_) {
-						return {adjusted_viewpoint, was_adjusted};
-					}
-				}
-			}
-		}
-		adjusted_viewpoint.pose.position.x -= distance * std::cos(yaw);
-		adjusted_viewpoint.pose.position.y -= distance * std::sin(yaw);
-		was_adjusted = true;
-	}
-	adjusted_viewpoint.header.frame_id = "";
-	return {adjusted_viewpoint, was_adjusted};
+    const geometry_msgs::msg::PoseStamped &viewpoint, float distance, float resolution, int max_attempts) {
+    geometry_msgs::msg::PoseStamped adjusted = viewpoint;
+    bool was_adjusted = false;
+    if (!costmap_) {
+        RCLCPP_ERROR(this->get_logger(), "Costmap is null");
+        adjusted.header.frame_id = "";
+        return {adjusted, was_adjusted};
+    }
+    tf2::Quaternion quat;
+    tf2::fromMsg(adjusted.pose.orientation, quat);
+    double yaw = tf2::getYaw(quat);
+    double cos_yaw = std::cos(yaw);
+    double sin_yaw = std::sin(yaw);
+
+    for (int attempt = 0; attempt < max_attempts; ++attempt) {
+        int x_idx = static_cast<int>((adjusted.pose.position.x - costmap_->info.origin.position.x) / resolution);
+        int y_idx = static_cast<int>((adjusted.pose.position.y - costmap_->info.origin.position.y) / resolution);
+        if (x_idx < 0 || x_idx >= static_cast<int>(costmap_->info.width) ||
+            y_idx < 0 || y_idx >= static_cast<int>(costmap_->info.height)) {
+            break; // Out of bounds
+        }
+        int idx = y_idx * costmap_->info.width + x_idx;
+        if (costmap_->data[idx] <= obstacle_threshold_) {
+            // Check forward cell for edge safety
+            double fx = adjusted.pose.position.x + distance * cos_yaw;
+            double fy = adjusted.pose.position.y + distance * sin_yaw;
+            int fx_idx = static_cast<int>((fx - costmap_->info.origin.position.x) / resolution);
+            int fy_idx = static_cast<int>((fy - costmap_->info.origin.position.y) / resolution);
+            if (fx_idx >= 0 && fx_idx < static_cast<int>(costmap_->info.width) &&
+                fy_idx >= 0 && fy_idx < static_cast<int>(costmap_->info.height)) {
+                int fidx = fy_idx * costmap_->info.width + fx_idx;
+                if (costmap_->data[fidx] <= obstacle_threshold_) {
+                    return {adjusted, was_adjusted};
+                }
+            }
+        }
+        // Move backwards along -yaw
+        adjusted.pose.position.x -= distance * cos_yaw;
+        adjusted.pose.position.y -= distance * sin_yaw;
+        was_adjusted = true;
+    }
+    adjusted.header.frame_id = "";
+    return {adjusted, was_adjusted};
 }
 
 tf2::Quaternion PathInterpolator::interpolateYaw(
@@ -277,7 +282,7 @@ std::vector<geometry_msgs::msg::PoseStamped> PathInterpolator::planPath(
 	}
 	std::vector<geometry_msgs::msg::PoseStamped> adjusted_full_path;
 	for (const auto &pose : full_path) {
-		auto [adjusted_pose, was_adjusted] = adjustviewpointForCollision(pose, extra_safety_distance_, costmap_->info.resolution, 5);
+		auto [adjusted_pose, was_adjusted] = adjustviewpointForCollision(pose, extra_safety_distance_, costmap_->info.resolution, 10);
 		adjusted_full_path.push_back(adjusted_pose);
 	}
 	adjusted_full_path.erase(
