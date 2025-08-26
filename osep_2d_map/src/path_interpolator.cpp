@@ -92,7 +92,7 @@ void PathInterpolator::updateGroundTruthTrajectory() {
 	ground_truth_trajectory_pub_->publish(ground_truth_trajectory_);
 }
 
-std::pair<geometry_msgs::msg::PoseStamped, bool> PathInterpolator::adjustviewpointForCollision(
+std::pair<geometry_msgs::msg::PoseStamped, bool> PathInterpolator::adjustViewpointForCollision(
     const geometry_msgs::msg::PoseStamped &viewpoint, float distance, float resolution, int max_attempts) {
     geometry_msgs::msg::PoseStamped adjusted = viewpoint;
     bool was_adjusted = false;
@@ -115,20 +115,20 @@ std::pair<geometry_msgs::msg::PoseStamped, bool> PathInterpolator::adjustviewpoi
             break; // Out of bounds
         }
         int idx = y_idx * costmap_->info.width + x_idx;
-        if (costmap_->data[idx] <= obstacle_threshold_) {
-            // Check forward cell for edge safety
-            double fx = adjusted.pose.position.x + distance * cos_yaw;
-            double fy = adjusted.pose.position.y + distance * sin_yaw;
-            int fx_idx = static_cast<int>((fx - costmap_->info.origin.position.x) / resolution);
-            int fy_idx = static_cast<int>((fy - costmap_->info.origin.position.y) / resolution);
-            if (fx_idx >= 0 && fx_idx < static_cast<int>(costmap_->info.width) &&
-                fy_idx >= 0 && fy_idx < static_cast<int>(costmap_->info.height)) {
-                int fidx = fy_idx * costmap_->info.width + fx_idx;
-                if (costmap_->data[fidx] <= obstacle_threshold_) {
-                    return {adjusted, was_adjusted};
-                }
-            }
-        }
+		if (costmap_->data[idx] <= obstacle_threshold_) {
+			// Check forward cell for edge safety (2*distance)
+			double fx = adjusted.pose.position.x + 2 * distance * cos_yaw;
+			double fy = adjusted.pose.position.y + 2 * distance * sin_yaw;
+			int fx_idx = static_cast<int>((fx - costmap_->info.origin.position.x) / resolution);
+			int fy_idx = static_cast<int>((fy - costmap_->info.origin.position.y) / resolution);
+			if (fx_idx >= 0 && fx_idx < static_cast<int>(costmap_->info.width) &&
+				fy_idx >= 0 && fy_idx < static_cast<int>(costmap_->info.height)) {
+				int fidx = fy_idx * costmap_->info.width + fx_idx;
+				if (costmap_->data[fidx] <= obstacle_threshold_) {
+					return {adjusted, was_adjusted};
+				}
+			}
+		}
         // Move backwards along -yaw
         adjusted.pose.position.x -= distance * cos_yaw;
         adjusted.pose.position.y -= distance * sin_yaw;
@@ -184,7 +184,7 @@ std::vector<geometry_msgs::msg::PoseStamped> PathInterpolator::interpolateAndAdj
         intermediate.pose.position.z = start.pose.position.z + fraction * (goal.pose.position.z - start.pose.position.z);
         tf2::Quaternion quaternion = interpolateYaw(start.pose, goal.pose, fraction);
         intermediate.pose.orientation = tf2::toMsg(quaternion);
-        auto [adjusted_intermediate, was_adjusted] = adjustviewpointForCollision(intermediate, extra_safety_distance_, costmap_->info.resolution, 10);
+        auto [adjusted_intermediate, was_adjusted] = adjustViewpointForCollision(intermediate, extra_safety_distance_, costmap_->info.resolution, 10);
         if (adjusted_intermediate.header.frame_id.empty()) {
             invalid_flag = true;
             return viewpoints;
@@ -335,18 +335,13 @@ std::vector<geometry_msgs::msg::PoseStamped> PathInterpolator::movingAverageFilt
 std::vector<geometry_msgs::msg::PoseStamped> PathInterpolator::adjustAndDownsamplePath(
 	const std::vector<geometry_msgs::msg::PoseStamped> &path) {
 	// Shift all poses back by extra_safety_distance_ along -yaw direction
-	std::vector<geometry_msgs::msg::PoseStamped> shifted_path;
-	shifted_path.reserve(path.size());
+	std::vector<geometry_msgs::msg::PoseStamped> adjusted_path;
+	adjusted_path.reserve(path.size());
 	for (const auto &pose : path) {
-		geometry_msgs::msg::PoseStamped shifted = pose;
-		tf2::Quaternion quat;
-		tf2::fromMsg(pose.pose.orientation, quat);
-		double yaw = tf2::getYaw(quat);
-		shifted.pose.position.x -= extra_safety_distance_ * std::cos(yaw);
-		shifted.pose.position.y -= extra_safety_distance_ * std::sin(yaw);
-		shifted_path.emplace_back(std::move(shifted));
+		auto [adjusted_pose, was_adjusted] = adjustViewpointForCollision(pose, extra_safety_distance_, costmap_->info.resolution, 3);
+		adjusted_path.push_back(adjusted_pose);
 	}
-	return downsamplePath(shifted_path, interpolation_distance_);
+	return downsamplePath(adjusted_path, interpolation_distance_);
 }
 
 std::vector<geometry_msgs::msg::PoseStamped> PathInterpolator::planPath(
@@ -579,7 +574,7 @@ void PathInterpolator::handlePathFailure(const geometry_msgs::msg::PoseStamped& 
     nav_msgs::msg::Path smoothed_path;
     smoothed_path.header.stamp = this->now();
     smoothed_path.header.frame_id = costmap_->header.frame_id;
-    geometry_msgs::msg::PoseStamped current_position_adjusted = adjustviewpointForCollision(current_position, extra_safety_distance_, costmap_->info.resolution, 10).first;
+    geometry_msgs::msg::PoseStamped current_position_adjusted = adjustViewpointForCollision(current_position, extra_safety_distance_, costmap_->info.resolution, 10).first;
     if (current_position_adjusted.header.frame_id.empty()) {
         RCLCPP_ERROR(this->get_logger(), "Failed to adjust current position for collision-free zone");
         nav_msgs::msg::Path empty_path;
@@ -652,7 +647,7 @@ void PathInterpolator::viewpointsCallback(const nav_msgs::msg::Path::SharedPtr m
 	adjusted_viewpoints_.poses.reserve(msg->poses.size());
 
 	for (const auto &pose : msg->poses) {
-		auto [adjusted_pose, _] = adjustviewpointForCollision(pose, extra_safety_distance_, costmap_->info.resolution, 5);
+		auto [adjusted_pose, _] = adjustViewpointForCollision(pose, extra_safety_distance_, costmap_->info.resolution, 5);
 		all_adjusted_viewpoints.poses.push_back(adjusted_pose);
 		if (!adjusted_pose.header.frame_id.empty()) {
 			adjusted_viewpoints_.poses.push_back(adjusted_pose);

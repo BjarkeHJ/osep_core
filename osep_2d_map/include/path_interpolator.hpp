@@ -102,7 +102,7 @@ private:
 
     // --- Utility Methods ---
     geometry_msgs::msg::PoseStamped getCurrentPosition();
-    std::pair<geometry_msgs::msg::PoseStamped, bool> adjustviewpointForCollision(
+    std::pair<geometry_msgs::msg::PoseStamped, bool> adjustViewpointForCollision(
         const geometry_msgs::msg::PoseStamped &viewpoint, float distance, float resolution, int max_attempts);
     tf2::Quaternion interpolateYaw(
         const geometry_msgs::msg::Pose &start_pose,
