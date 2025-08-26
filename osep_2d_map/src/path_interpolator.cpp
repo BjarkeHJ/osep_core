@@ -205,33 +205,34 @@ bool PathInterpolator::aStarSearch(
 	std::function<float(int, int, int, int)> heuristic) {
 	int width = costmap_->info.width;
 	int height = costmap_->info.height;
+	using Direction = std::pair<int, int>;
+	const std::vector<Direction> directions = {{1,0}, {-1,0}, {0,1}, {0,-1}};
 	std::priority_queue<PlannerNode, std::vector<PlannerNode>, std::greater<PlannerNode>> open_list;
 	open_list.push({start_x, start_y, 0});
 	cost_so_far[toIndex(start_x, start_y)] = 0;
-	std::vector<int> dx = {1, -1, 0, 0};
-	std::vector<int> dy = {0, 0, 1, -1};
 	while (!open_list.empty()) {
 		PlannerNode current = open_list.top();
 		open_list.pop();
+		int current_index = toIndex(current.x, current.y);
 		if (current.x == goal_x && current.y == goal_y) {
 			return true;
 		}
-		for (size_t j = 0; j < dx.size(); ++j) {
-			int next_x = current.x + dx[j];
-			int next_y = current.y + dy[j];
+		for (const auto& dir : directions) {
+			int next_x = current.x + dir.first;
+			int next_y = current.y + dir.second;
 			if (next_x < 0 || next_y < 0 || next_x >= width || next_y >= height) {
 				continue;
 			}
-			int index = toIndex(next_x, next_y);
-			if (costmap_->data[index] > obstacle_threshold_) {
+			int next_index = toIndex(next_x, next_y);
+			if (costmap_->data[next_index] > obstacle_threshold_) {
 				continue;
 			}
-			float new_cost = cost_so_far[toIndex(current.x, current.y)] + 1;
-			if (!cost_so_far.count(index) || new_cost < cost_so_far[index]) {
-				cost_so_far[index] = new_cost;
+			float new_cost = cost_so_far[current_index] + 1;
+			if (!cost_so_far.count(next_index) || new_cost < cost_so_far[next_index]) {
+				cost_so_far[next_index] = new_cost;
 				float priority = new_cost + heuristic(next_x, next_y, goal_x, goal_y);
 				open_list.push({next_x, next_y, priority});
-				came_from[index] = toIndex(current.x, current.y);
+				came_from[next_index] = current_index;
 			}
 		}
 	}
