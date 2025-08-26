@@ -82,5 +82,14 @@ def generate_launch_description():
             parameters=[
                 
             ]
+        ),
+        Node(
+            package="osep_lidar_map",
+            executable="osep_lidar_map",
+            name="LidarMapNode",
+            output="screen",
+            parameters=[
+                
+            ]
         )
     ])

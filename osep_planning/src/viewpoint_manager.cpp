@@ -9,7 +9,6 @@ TODO: Incorporate 2d_local_costmap into the viewpoint sampling process.
 #include "viewpoint_manager.hpp"
 
 ViewpointManager::ViewpointManager(const ViewpointConfig& cfg) : cfg_(cfg) {
-
     VD.global_skel.reserve(1000);
     VD.global_vpts.reserve(5000);
     VD.updated_vertices.reserve(100);
@@ -22,7 +21,6 @@ bool ViewpointManager::viewpoint_run() {
     RUN_STEP(fetch_updated_vertices);
     RUN_STEP(branch_extract);
     RUN_STEP(viewpoint_sampling);
-
 
     return running;
 }
@@ -215,7 +213,7 @@ bool ViewpointManager::viewpoint_sampling() {
         if (!vertex.vpts.empty()) continue; // already has viewpoints and is not cleared
 
         std::vector<Viewpoint> new_vpts = generate_viewpoint(vertex.vid);
-
+        
         
     }
 
