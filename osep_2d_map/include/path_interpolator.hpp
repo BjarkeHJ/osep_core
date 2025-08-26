@@ -72,12 +72,33 @@ private:
     bool planSegments(const nav_msgs::msg::Path& init_path, nav_msgs::msg::Path& raw_path, int& fail_idx);
     void handlePathFailure(const geometry_msgs::msg::PoseStamped& current_position);
     void publishPaths(const nav_msgs::msg::Path& raw_path);
-
+    
     // Helper: Interpolate and adjust intermediate points between start and goal
     std::vector<geometry_msgs::msg::PoseStamped> interpolateAndAdjust(
         const geometry_msgs::msg::PoseStamped &start,
         const geometry_msgs::msg::PoseStamped &goal,
         bool &invalid_flag);
+
+    // Helper: A* search for 2D grid
+    bool aStarSearch(
+        int start_x, int start_y, int goal_x, int goal_y,
+        std::unordered_map<int, int> &came_from,
+        std::unordered_map<int, float> &cost_so_far,
+        std::function<int(int, int)> toIndex,
+        std::function<float(int, int, int, int)> heuristic);
+
+    // Helper: Reconstruct path from A* result
+    std::vector<geometry_msgs::msg::PoseStamped> reconstructPath(
+        int goal_x, int goal_y, int width, float resolution,
+        const geometry_msgs::msg::PoseStamped &start,
+        const geometry_msgs::msg::PoseStamped &goal,
+        std::unordered_map<int, int> &came_from,
+        std::unordered_map<int, float> &cost_so_far,
+        std::function<int(int, int)> toIndex);
+
+    // Helper: Adjust path for collisions and downsample
+    std::vector<geometry_msgs::msg::PoseStamped> adjustAndDownsamplePath(
+        const std::vector<geometry_msgs::msg::PoseStamped> &path);
 
     // --- Utility Methods ---
     geometry_msgs::msg::PoseStamped getCurrentPosition();

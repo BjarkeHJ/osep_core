@@ -193,37 +193,16 @@ std::vector<geometry_msgs::msg::PoseStamped> PathInterpolator::interpolateAndAdj
 	return viewpoints;
 }
 
-std::vector<geometry_msgs::msg::PoseStamped> PathInterpolator::planPath(
-	const geometry_msgs::msg::PoseStamped &start,
-	const geometry_msgs::msg::PoseStamped &goal) {
-	if (!costmap_) {
-		RCLCPP_ERROR(this->get_logger(), "No costmap available");
-		return {};
-	}
-	   bool invalid_flag = false;
-	   int width = costmap_->info.width;
-	   int height = costmap_->info.height;
-	   float resolution = costmap_->info.resolution;
-	   auto toIndex = [&](int x, int y) { return y * width + x; };
-	   auto heuristic = [&](int x1, int y1, int x2, int y2) {
-		   return std::sqrt(std::pow(x1 - x2, 2) + std::pow(y1 - y2, 2));
-	   };
-	   std::vector<geometry_msgs::msg::PoseStamped> viewpoints = interpolateAndAdjust(start, goal, invalid_flag);
-	   if (!invalid_flag) {
-		   return viewpoints;
-	   }
-	std::vector<geometry_msgs::msg::PoseStamped> full_path;
-	if (viewpoints.size() < 2) {
-		RCLCPP_ERROR(this->get_logger(), "Not enough viewpoints to plan a path");
-		return {};
-	}
-	int start_x = static_cast<int>((start.pose.position.x - costmap_->info.origin.position.x) / resolution);
-	int start_y = static_cast<int>((start.pose.position.y - costmap_->info.origin.position.y) / resolution);
-	int goal_x = static_cast<int>((goal.pose.position.x - costmap_->info.origin.position.x) / resolution);
-	int goal_y = static_cast<int>((goal.pose.position.y - costmap_->info.origin.position.y) / resolution);
+// Helper: A* search for 2D grid
+bool PathInterpolator::aStarSearch(
+	int start_x, int start_y, int goal_x, int goal_y,
+	std::unordered_map<int, int> &came_from,
+	std::unordered_map<int, float> &cost_so_far,
+	std::function<int(int, int)> toIndex,
+	std::function<float(int, int, int, int)> heuristic) {
+	int width = costmap_->info.width;
+	int height = costmap_->info.height;
 	std::priority_queue<PlannerNode, std::vector<PlannerNode>, std::greater<PlannerNode>> open_list;
-	std::unordered_map<int, int> came_from;
-	std::unordered_map<int, float> cost_so_far;
 	open_list.push({start_x, start_y, 0});
 	cost_so_far[toIndex(start_x, start_y)] = 0;
 	std::vector<int> dx = {1, -1, 0, 0};
@@ -232,7 +211,7 @@ std::vector<geometry_msgs::msg::PoseStamped> PathInterpolator::planPath(
 		PlannerNode current = open_list.top();
 		open_list.pop();
 		if (current.x == goal_x && current.y == goal_y) {
-			break;
+			return true;
 		}
 		for (size_t j = 0; j < dx.size(); ++j) {
 			int next_x = current.x + dx[j];
@@ -253,6 +232,18 @@ std::vector<geometry_msgs::msg::PoseStamped> PathInterpolator::planPath(
 			}
 		}
 	}
+	return false;
+}
+
+// Helper: Reconstruct path from A* result
+std::vector<geometry_msgs::msg::PoseStamped> PathInterpolator::reconstructPath(
+	int goal_x, int goal_y, int width, float resolution,
+	const geometry_msgs::msg::PoseStamped &start,
+	const geometry_msgs::msg::PoseStamped &goal,
+	std::unordered_map<int, int> &came_from,
+	std::unordered_map<int, float> &cost_so_far,
+	std::function<int(int, int)> toIndex) {
+	std::vector<geometry_msgs::msg::PoseStamped> full_path;
 	int current_index = toIndex(goal_x, goal_y);
 	float total_distance_2d = cost_so_far[toIndex(goal_x, goal_y)];
 	if (total_distance_2d <= 0.0f) {
@@ -282,12 +273,14 @@ std::vector<geometry_msgs::msg::PoseStamped> PathInterpolator::planPath(
 	}
 	full_path.push_back(start);
 	std::reverse(full_path.begin(), full_path.end());
-	if (full_path.size() <= 2) {
-		RCLCPP_ERROR(this->get_logger(), "A* failed to find a valid path. Only start and end points are available.");
-		return {};
-	}
+	return full_path;
+}
+
+// Helper: Adjust path for collisions and downsample
+std::vector<geometry_msgs::msg::PoseStamped> PathInterpolator::adjustAndDownsamplePath(
+	const std::vector<geometry_msgs::msg::PoseStamped> &path) {
 	std::vector<geometry_msgs::msg::PoseStamped> adjusted_full_path;
-	for (const auto &pose : full_path) {
+	for (const auto &pose : path) {
 		auto [adjusted_pose, was_adjusted] = adjustviewpointForCollision(pose, extra_safety_distance_, costmap_->info.resolution, 10);
 		adjusted_full_path.push_back(adjusted_pose);
 	}
@@ -299,9 +292,48 @@ std::vector<geometry_msgs::msg::PoseStamped> PathInterpolator::planPath(
 				return pose.header.frame_id.empty();
 			}),
 		adjusted_full_path.end());
-	full_path = std::move(adjusted_full_path);
-	full_path = downsamplePath(full_path, interpolation_distance_);
-	return full_path;
+	return downsamplePath(adjusted_full_path, interpolation_distance_);
+}
+
+std::vector<geometry_msgs::msg::PoseStamped> PathInterpolator::planPath(
+	const geometry_msgs::msg::PoseStamped &start,
+	const geometry_msgs::msg::PoseStamped &goal) {
+	if (!costmap_) {
+		RCLCPP_ERROR(this->get_logger(), "No costmap available");
+		return {};
+	}
+		bool invalid_flag = false;
+		int width = costmap_->info.width;
+		float resolution = costmap_->info.resolution;
+		auto toIndex = [&](int x, int y) { return y * width + x; };
+		auto heuristic = [&](int x1, int y1, int x2, int y2) {
+			return std::sqrt(std::pow(x1 - x2, 2) + std::pow(y1 - y2, 2));
+		};
+		std::vector<geometry_msgs::msg::PoseStamped> viewpoints = interpolateAndAdjust(start, goal, invalid_flag);
+		if (!invalid_flag) {
+			return viewpoints;
+		}
+		if (viewpoints.size() < 2) {
+			RCLCPP_ERROR(this->get_logger(), "Not enough viewpoints to plan a path");
+			return {};
+		}
+		int start_x = static_cast<int>((start.pose.position.x - costmap_->info.origin.position.x) / resolution);
+		int start_y = static_cast<int>((start.pose.position.y - costmap_->info.origin.position.y) / resolution);
+		int goal_x = static_cast<int>((goal.pose.position.x - costmap_->info.origin.position.x) / resolution);
+		int goal_y = static_cast<int>((goal.pose.position.y - costmap_->info.origin.position.y) / resolution);
+		std::unordered_map<int, int> came_from;
+		std::unordered_map<int, float> cost_so_far;
+		if (!aStarSearch(start_x, start_y, goal_x, goal_y, came_from, cost_so_far, toIndex, heuristic)) {
+			RCLCPP_ERROR(this->get_logger(), "A* failed to find a valid path.");
+			return {};
+		}
+		std::vector<geometry_msgs::msg::PoseStamped> full_path = reconstructPath(
+			goal_x, goal_y, width, resolution, start, goal, came_from, cost_so_far, toIndex);
+		if (full_path.size() <= 2) {
+			RCLCPP_ERROR(this->get_logger(), "A* failed to find a valid path. Only start and end points are available.");
+			return {};
+		}
+		return adjustAndDownsamplePath(full_path);
 }
 
 std::vector<geometry_msgs::msg::PoseStamped> PathInterpolator::downsamplePath(
