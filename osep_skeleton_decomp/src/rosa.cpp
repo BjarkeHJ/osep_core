@@ -73,7 +73,7 @@ bool Rosa::preprocess() {
     for (size_t i = 0; i < src.size(); ++i) {
         const auto& p = src[i];
         const float d2 = p.x * p.x + p.y * p.y + p.z * p.z;
-        if (std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z) && d2 <= r2) {
+        if (std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z) && d2 <= r2 && d2 > 0.1f*0.1f) {
             dst[n++] = p;
         }
     }

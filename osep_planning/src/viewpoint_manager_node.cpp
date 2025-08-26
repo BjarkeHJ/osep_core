@@ -26,18 +26,21 @@ public:
 private:
     /* Functions */
     void skeleton_callback(MsgSkeleton::ConstSharedPtr vtx_msg);
+    void map_callback(sensor_msgs::msg::PointCloud2::ConstSharedPtr pcd_msg);
+    void publish_viewpoints(const std::vector<Viewpoint>& viewpoints, std_msgs::msg::Header src_header);
     void process_tick();
-    void publish_reduced_skel(const std::vector<Vertex>& vertices, const std_msgs::msg::Header& src_header);
 
     /* ROS2 */
     rclcpp::Subscription<MsgSkeleton>::SharedPtr skel_sub_;
-    rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr costmap_sub_;
+    // rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr costmap_sub_;
+    rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr map_sub_;
     rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr vp_pub_;
     rclcpp::TimerBase::SharedPtr tick_timer_;
 
     /* Params */
     std::string skel_topic_;
     std::string vp_topic_;
+    std::string map_topic_;
     std::string costmap_topic_;
     std::string global_frame_id_;
     int tick_ms_;
@@ -49,6 +52,7 @@ private:
     /* Data */
     ViewpointConfig vpman_cfg;
     MsgSkeleton::ConstSharedPtr latest_msg_;
+    sensor_msgs::msg::PointCloud2::ConstSharedPtr latest_map_msg_;
 };
 
 ViewpointNode::ViewpointNode() : Node("ViewpointManagerNode") {
@@ -58,23 +62,31 @@ ViewpointNode::ViewpointNode() : Node("ViewpointManagerNode") {
 
     costmap_topic_ = declare_parameter<std::string>("costmap_topic", "/osep/local_costmap/costmap");
     vp_topic_ = declare_parameter<std::string>("viewpoint_topic", "/osep/viewpoint_manager/viewpoints");
+    map_topic_ = declare_parameter<std::string>("map_topic", "/osep/lidar_map/global_map");
     tick_ms_ = declare_parameter<int>("tick_ms", 50);
     global_frame_id_ = declare_parameter<std::string>("global_frame_id", "odom");
     // VIEWPOINT MANAGER
-    
+
+    vpman_cfg.map_voxel_size = declare_parameter<float>("map_voxel_size", 1.0f);
+    vpman_cfg.vpt_disp_dist = declare_parameter<float>("vpt_displacement_dist", 10.0f);
 
     /* OBJECT INITIALIZATION */
     vpman_ = std::make_unique<ViewpointManager>(vpman_cfg);
 
     /* ROS2 */
-    auto sub_qos = rclcpp::QoS(rclcpp::KeepLast(1));
-    sub_qos.reliable().transient_local();
+    auto sub_qos = rclcpp::QoS(rclcpp::KeepLast(1)).best_effort();
+    // sub_qos.reliable().transient_local();
     skel_sub_ = this->create_subscription<MsgSkeleton>(skel_topic_,
                                                        sub_qos,
                                                        std::bind(&ViewpointNode::skeleton_callback, this, std::placeholders::_1));
+    map_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(map_topic_,
+                                                                        sub_qos,
+                                                                        std::bind(&ViewpointNode::map_callback, this, std::placeholders::_1));
     auto pub_qos = rclcpp::QoS(rclcpp::KeepLast(1));
     pub_qos.reliable().transient_local();
 
+    vp_pub_ = this->create_publisher<geometry_msgs::msg::PoseArray>(vp_topic_, pub_qos);
+    
     tick_timer_ = create_wall_timer(std::chrono::milliseconds(tick_ms_), std::bind(&ViewpointNode::process_tick, this));
     /* INITIALIZE DATA STRUCTURES */
 }
@@ -86,15 +98,46 @@ void ViewpointNode::skeleton_callback(MsgSkeleton::ConstSharedPtr vtx_msg) {
     return;
 }
 
+void ViewpointNode::map_callback(sensor_msgs::msg::PointCloud2::ConstSharedPtr pcd_msg) {
+    if (!pcd_msg) return;
+    std::scoped_lock lk(latest_mutex_);
+    latest_map_msg_ = std::move(pcd_msg);
+    return;
+}
+
+void ViewpointNode::publish_viewpoints(const std::vector<Viewpoint>& viewpoints, std_msgs::msg::Header src_header) {
+    if (viewpoints.empty()) return;
+
+    geometry_msgs::msg::PoseArray vpts_msg;
+    vpts_msg.header = src_header;
+
+    for (const auto& vp : viewpoints) {
+        geometry_msgs::msg::Pose vp_pose;
+        vp_pose.position.x = vp.position.x();
+        vp_pose.position.y = vp.position.y();
+        vp_pose.position.z = vp.position.z();
+        vp_pose.orientation.x = vp.orientation.x();
+        vp_pose.orientation.y = vp.orientation.y();
+        vp_pose.orientation.z = vp.orientation.z();
+        vp_pose.orientation.w = vp.orientation.w();
+        vpts_msg.poses.push_back(vp_pose);
+    }
+    vp_pub_->publish(vpts_msg);
+}
+
+
 void ViewpointNode::process_tick() {
     MsgSkeleton::ConstSharedPtr msg;
+    sensor_msgs::msg::PointCloud2::ConstSharedPtr map_msg;
     {
         std::scoped_lock lk(latest_mutex_);
         msg = latest_msg_;
         latest_msg_.reset();
+        map_msg = latest_map_msg_;
+        latest_map_msg_.reset();
     }
 
-    if (!msg) return;
+    if (!msg || !map_msg) return;
 
     auto& skel = vpman_->input_skeleton();
     skel.clear();
@@ -116,11 +159,17 @@ void ViewpointNode::process_tick() {
         skel.push_back(v);
     }
 
-    if (vpman_->viewpoint_run()) {
-        // publish viewpoints
-    }
+    auto& map = vpman_->input_map();
+    pcl::fromROSMsg(*map_msg, map);
+    
 
+    if (vpman_->viewpoint_run()) {
+        auto& viewpoints = vpman_->output_vpts(); // fetch generated viewpoints
+        publish_viewpoints(viewpoints, map_msg->header);
+    }
 }
+
+
 
 int main(int argc, char** argv) {
     rclcpp::init(argc, argv);

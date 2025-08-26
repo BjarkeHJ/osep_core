@@ -1,16 +1,6 @@
 /*
 
-LiDAR mapping Node — EMA voxel grid with temporal decay + noise suppression
-
-- Insert/update by voxel index (hash map) => O(1)
-- Each voxel stores:
-    mean (EMA centroid), weight (decayed hit count), variance (optional), last_seen
-- Maintenance timer:
-    * decays weights of stale voxels
-    * prunes very light/old voxels
-- Publish:
-    * outputs centroids for voxels that pass:
-        weight >= min_weight AND neighbor_support >= min_neighbors
+LiDAR mapping Node — EMA voxel grid + noise suppression
 
 */
 
@@ -56,16 +46,14 @@ private:
     };
     struct VoxelStat {
         Eigen::Vector3f mean = Eigen::Vector3f::Zero();
-        Eigen::Vector3f var  = Eigen::Vector3f::Zero();  // optional; EMA of squared error
-        float weight = 0.f;                               // decayed hit count
-        rclcpp::Time last_seen;
+        Eigen::Vector3f var  = Eigen::Vector3f::Zero(); // optional; EMA of squared error
+        int count = 0; // hit count
         bool initialized = false;
     };
 
     // ---- ROS I/O
     void pointcloud_callback(sensor_msgs::msg::PointCloud2::ConstSharedPtr pcd_msg);
     void publish_map();
-    void maintenance_tick();
 
     // ---- Helpers
     inline VoxelIndex toIndex(const Eigen::Vector3f& p) const {
@@ -77,19 +65,16 @@ private:
     }
     inline Eigen::Vector3f centerOf(const VoxelIndex& v) const {
         return Eigen::Vector3f(
-            (v.x + 0.5f) * static_cast<float>(voxel_size_),
-            (v.y + 0.5f) * static_cast<float>(voxel_size_),
-            (v.z + 0.5f) * static_cast<float>(voxel_size_)
+            (v.x + 0.5f) * voxel_size_,
+            (v.y + 0.5f) * voxel_size_,
+            (v.z + 0.5f) * voxel_size_
         );
-    }
-    inline float decayFactor(double dt_sec) const {
-        if (decay_lambda_ <= 0.0) return 1.0f;
-        return static_cast<float>(std::exp(-decay_lambda_ * dt_sec));
     }
 
     // ---- ROS
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr pcd_sub_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr map_pub_;
+
     rclcpp::TimerBase::SharedPtr pub_timer_;
     rclcpp::TimerBase::SharedPtr maint_timer_;
     std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
@@ -100,24 +85,21 @@ private:
     std::string map_topic_;
     std::string global_frame_;
 
-    double voxel_size_;          // m (grid resolution)
-    double ema_alpha_;           // [0..1] position EMA gain (higher -> faster adapt)
-    double half_life_sec_;       // seconds for weight to half (<=0 disables decay)
-    double decay_lambda_;        // computed from half_life_sec_: ln(2)/half_life
-    double max_range_;           // m (<=0 disables)
-    double ground_min_z_;        // m (filter below this global Z)
-    int    publish_ms_;          // publish period
-    int    maintenance_ms_;      // maintenance (decay/prune) period
+    float voxel_size_;          // grid resolution [m]
+    float ema_alpha_;           // [0..1] position EMA gain (higher -> faster adapt)
+    float max_range_;           // m (<=0 disables)
+    float min_range_;
+    float ground_min_z_;        // m (filter below this global Z)
+    int publish_ms_;          // publish period
 
     // Noise suppression (publish-time gates)
-    double min_weight_;          // output only voxels with >= this decayed count
-    int    min_neighbors_;       // need this many neighbors in 26-neighborhood
-    double neighbor_weight_min_; // neighbors must have at least this weight
+    int min_count_;         
+    int min_neighbors_;       // need this many neighbors in 26-neighborhood
+    float neighbor_count_min_; // neighbors must have at least this count
 
     // Pruning bounds
-    double prune_weight_;        // drop voxels below this weight during maintenance
-    double max_age_sec_;         // hard age cap (<=0 disables)
-    size_t max_voxels_;          // soft cap; prune lightest if exceeded (optional)
+    float prune_count_;        // drop voxels below this weight during maintenance
+    int max_voxels_;          // soft cap; prune lightest if exceeded (optional)
 
     // ---- Data
     std::unordered_map<VoxelIndex, VoxelStat, VoxelHash> grid_;
@@ -127,41 +109,35 @@ private:
 LidarMapNode::LidarMapNode() : Node("LidarMapNode")
 {
     // Parameters (tuned defaults)
-    pcd_topic_      = declare_parameter<std::string>("lidar_topic", "/isaac/lidar/raw/pointcloud");
-    map_topic_      = declare_parameter<std::string>("lidar_map_topic", "/osep/lidar_map/global_map");
-    global_frame_   = declare_parameter<std::string>("global_frame", "odom");
+    pcd_topic_ = declare_parameter<std::string>("lidar_topic", "/isaac/lidar/raw/pointcloud");
+    map_topic_ = declare_parameter<std::string>("lidar_map_topic", "/osep/lidar_map/global_map");
+    global_frame_ = declare_parameter<std::string>("global_frame", "odom");
 
-    voxel_size_     = declare_parameter<double>("voxel_size", 0.25); // m
-    ema_alpha_      = declare_parameter<double>("ema_alpha", 0.3);   // 0.1–0.4 common
-    half_life_sec_  = declare_parameter<double>("half_life_sec", 0.0);
-    decay_lambda_   = (half_life_sec_ > 0.0) ? std::log(2.0)/half_life_sec_ : 0.0;
+    voxel_size_ = declare_parameter<float>("voxel_size", 1.0f); // m
+    ema_alpha_ = declare_parameter<float>("ema_alpha", 0.3f);   // 0.1–0.4 common
 
-    max_range_      = declare_parameter<double>("max_range", 120.0);
-    ground_min_z_   = declare_parameter<double>("ground_min_z", -1e9);
+    min_range_ = declare_parameter<float>("min_range", 0.5);
+    max_range_ = declare_parameter<float>("max_range", 120.0f);
+    ground_min_z_ = declare_parameter<float>("ground_min_z", 60.0f);
 
-    publish_ms_     = declare_parameter<int>("publish_ms", 100);
-    maintenance_ms_ = declare_parameter<int>("maintenance_ms", 500);
+    publish_ms_ = declare_parameter<int>("publish_ms", 100);
 
-    min_weight_         = declare_parameter<double>("min_weight", 3.0);
-    min_neighbors_      = declare_parameter<int>("min_neighbors", 2);
-    neighbor_weight_min_= declare_parameter<double>("neighbor_weight_min", 2.0);
+    min_count_ = declare_parameter<int>("min_weight", 10);
+    min_neighbors_ = declare_parameter<int>("min_neighbors", 2);
+    neighbor_count_min_= declare_parameter<float>("neighbor_weight_min", 2);
 
-    prune_weight_   = declare_parameter<double>("prune_weight", 0.5);
-    max_age_sec_    = declare_parameter<double>("max_age_sec", 0.0);    // 0 = disable
-    max_voxels_     = declare_parameter<int>("max_voxels", 800000);  // soft cap
+    prune_count_ = declare_parameter<float>("prune_weight", 1);
+    max_voxels_ = declare_parameter<int>("max_voxels", 800000);  // soft cap
 
     // ROS I/O
     pcd_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
         pcd_topic_, rclcpp::SensorDataQoS(),
         std::bind(&LidarMapNode::pointcloud_callback, this, std::placeholders::_1));
 
-    map_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(map_topic_, rclcpp::SystemDefaultsQoS());
+    map_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(map_topic_, rclcpp::SystemDefaultsQoS());    
 
     pub_timer_ = create_wall_timer(
         std::chrono::milliseconds(publish_ms_), std::bind(&LidarMapNode::publish_map, this));
-
-    maint_timer_ = create_wall_timer(
-        std::chrono::milliseconds(maintenance_ms_), std::bind(&LidarMapNode::maintenance_tick, this));
 
     // TF
     tf_buffer_   = std::make_shared<tf2_ros::Buffer>(get_clock());
@@ -187,7 +163,7 @@ void LidarMapNode::pointcloud_callback(sensor_msgs::msg::PointCloud2::ConstShare
     Eigen::Matrix4f T = T_map_from_cloud.matrix().cast<float>();
 
     // Convert incoming cloud
-    pcl::PointCloud<PointT>::Ptr cloud(new CloudT());
+    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>);
     try {
         pcl::fromROSMsg(*pcd_msg, *cloud);
     } catch (const std::exception& e) {
@@ -200,10 +176,21 @@ void LidarMapNode::pointcloud_callback(sensor_msgs::msg::PointCloud2::ConstShare
     pcl::removeNaNFromPointCloud(*cloud, *cloud, index_map);
     if (cloud->empty()) return;
 
-    // Optional range crop (sensor frame)
+    // Range crop (sensor frame)
+    if (min_range_ > 0.0) {
+        auto filtered = pcl::PointCloud<pcl::PointXYZ>::Ptr(new pcl::PointCloud<pcl::PointXYZ>);
+        filtered->reserve(cloud->size());
+        const float min_r2 = min_range_ * min_range_;
+        for (const auto& p : cloud->points) {
+            const float r2 = p.x*p.x + p.y*p.y + p.z*p.z;
+            if (r2 >= min_r2) filtered->push_back(p);
+        }
+        cloud.swap(filtered);
+        if (cloud->empty()) return;
+    }
     if (max_range_ > 0.0) {
-        const float r2max = static_cast<float>(max_range_ * max_range_);
-        CloudT::Ptr cropped(new CloudT());
+        const float r2max = max_range_ * max_range_;
+        pcl::PointCloud<pcl::PointXYZ>::Ptr cropped(new pcl::PointCloud<pcl::PointXYZ>);
         cropped->reserve(cloud->size());
         for (const auto &p : cloud->points) {
             const float r2 = p.x*p.x + p.y*p.y + p.z*p.z;
@@ -214,58 +201,51 @@ void LidarMapNode::pointcloud_callback(sensor_msgs::msg::PointCloud2::ConstShare
     }
 
     // Transform to global frame
-    CloudT::Ptr cloud_map(new CloudT());
+    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_map(new pcl::PointCloud<pcl::PointXYZ>);
     cloud_map->reserve(cloud->size());
     pcl::transformPointCloud(*cloud, *cloud_map, T);
     if (cloud_map->empty()) return;
-
-    const rclcpp::Time now_t = now();
 
     // Update EMA voxels
     std::scoped_lock lk(grid_mutex_);
     for (const auto &p : cloud_map->points) {
         if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) continue;
-        if (p.z < static_cast<float>(ground_min_z_)) continue;
+        if (p.z < ground_min_z_) continue;
 
-        Eigen::Vector3f pf(p.x, p.y, p.z);
+        Eigen::Vector3f pf(p.x, p.y, p.z); // Actual point position
         VoxelIndex vidx = toIndex(pf);
-        auto &v = grid_[vidx];
+        auto &v = grid_[vidx]; // Center of voxel
 
+        // If the voxel has not seen any points
         if (!v.initialized) {
-            v.mean = pf;
-            v.var  = Eigen::Vector3f::Zero();
-            v.weight = 1.f;
-            v.last_seen = now_t;
-            v.initialized = true;
-            continue;
+          v.mean = pf;
+          v.var  = Eigen::Vector3f::Zero();
+          v.count = 1;
+          v.initialized = true;
+          continue;
         }
+        else {
+          // EMA mean
+          const Eigen::Vector3f err  = pf - v.mean;
+          v.mean += ema_alpha_ * err;
 
-        // Temporal decay since last_seen
-        const double dt = (now_t - v.last_seen).seconds();
-        const float  d  = decayFactor(dt);
-        v.weight *= d;
-        v.var    *= d; // decay variance too (simple, effective)
+          // EMA variance (per-axis) around the *updated* mean
+          const Eigen::Vector3f err2 = (pf - v.mean).cwiseAbs2();
+          v.var  = (1.f - ema_alpha_) * v.var + ema_alpha_* err2;
 
-        // EMA update
-        const Eigen::Vector3f err = pf - v.mean;
-        v.mean += static_cast<float>(ema_alpha_) * err;
-        // EMA variance (per-axis)
-        const Eigen::Vector3f err2 = (pf - v.mean).cwiseAbs2();
-        v.var  = (1.f - static_cast<float>(ema_alpha_)) * v.var + static_cast<float>(ema_alpha_) * err2;
-
-        // Increment weight for this observation
-        v.weight += 1.f;
-        v.last_seen = now_t;
+          // Plain hit count
+          v.count += 1;
+        }
     }
 
     // Soft cap: if exceeding max_voxels_, prune some light voxels right away
-    if (max_voxels_ > 0 && grid_.size() > max_voxels_) {
+    if (max_voxels_ > 0 && static_cast<int>(grid_.size()) > max_voxels_) {
         // Quick linear pass (keep heaviest)
         std::vector<VoxelIndex> to_drop;
         to_drop.reserve(grid_.size()/10);
         const size_t target = grid_.size() - max_voxels_;
         for (const auto& kv : grid_) {
-            if (kv.second.weight < prune_weight_) {
+            if (kv.second.count < prune_count_) {
                 to_drop.push_back(kv.first);
                 if (to_drop.size() >= target) break;
             }
@@ -274,35 +254,8 @@ void LidarMapNode::pointcloud_callback(sensor_msgs::msg::PointCloud2::ConstShare
     }
 }
 
-void LidarMapNode::maintenance_tick()
-{
-    std::scoped_lock lk(grid_mutex_);
-    if (grid_.empty()) return;
-
-    const rclcpp::Time tnow = now();
-    for (auto it = grid_.begin(); it != grid_.end(); ) {
-        VoxelStat &v = it->second;
-
-        const double age = (tnow - v.last_seen).seconds();
-        const float  d   = decayFactor(age);
-
-        // Lazy apply decay (brings weight close to real-time)
-        float decayed_w = v.weight * d;
-
-        bool old = (max_age_sec_ > 0.0) && (age > max_age_sec_);
-        if (old || decayed_w < prune_weight_) {
-            it = grid_.erase(it);
-        } else {
-            // Optionally clamp stored weight to decayed value to prevent unbounded growth
-            v.weight = decayed_w;
-            ++it;
-        }
-    }
-}
-
-void LidarMapNode::publish_map()
-{
-    pcl::PointCloud<PointT>::Ptr out(new CloudT());
+void LidarMapNode::publish_map() {
+    pcl::PointCloud<pcl::PointXYZ>::Ptr out(new pcl::PointCloud<pcl::PointXYZ>);
     out->reserve(grid_.size());
 
     {
@@ -314,7 +267,7 @@ void LidarMapNode::publish_map()
             const VoxelIndex& c = kv.first;
             const VoxelStat&  v = kv.second;
             if (!v.initialized) continue;
-            if (v.weight < static_cast<float>(min_weight_)) continue;
+            if (v.count < min_count_) continue;
 
             int neighbors = 0;
             for (int dx=-1; dx<=1; ++dx) {
@@ -324,7 +277,7 @@ void LidarMapNode::publish_map()
                         VoxelIndex n{c.x+dx, c.y+dy, c.z+dz};
                         auto itn = grid_.find(n);
                         if (itn != grid_.end() && itn->second.initialized &&
-                            itn->second.weight >= static_cast<float>(neighbor_weight_min_)) {
+                            itn->second.count >= neighbor_count_min_) {
                             ++neighbors;
                         }
                     }
@@ -332,12 +285,14 @@ void LidarMapNode::publish_map()
             }
             if (neighbors < min_neighbors_) continue;
 
-            // Optional: variance gate to drop flicker (tune e.g., max stddev 0.5*voxel)
+            // std gate drop
             const Eigen::Vector3f stddev = v.var.cwiseMax(1e-12f).cwiseSqrt();
-            const float max_std = 0.6f * static_cast<float>(voxel_size_);
+            const float max_std = 0.6f * voxel_size_;
             if (stddev.maxCoeff() > max_std) continue;
-
-            out->points.emplace_back(v.mean.x(), v.mean.y(), v.mean.z());
+            
+            const Eigen::Vector3f c3 = centerOf(c);
+            out->points.emplace_back(c3.x(), c3.y(), c3.z());
+            // out->points.emplace_back(v.mean.x(), v.mean.y(), v.mean.z());
         }
     }
 

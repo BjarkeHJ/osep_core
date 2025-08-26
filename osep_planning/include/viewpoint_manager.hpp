@@ -6,6 +6,7 @@
 #include <unordered_set>
 #include <pcl/common/common.h>
 #include <Eigen/Core>
+#include <pcl/octree/octree.h>
 
 #define RUN_STEP(fn) \
     do { \
@@ -15,7 +16,8 @@
     } while (0)
 
 struct ViewpointConfig {
-    int test;
+    float map_voxel_size;
+    float vpt_disp_dist;
 };
 
 struct PairHash {
@@ -46,14 +48,16 @@ struct Vertex {
     std::vector<Viewpoint> vpts; // Vertex viewpoints
 };
 
+
 struct ViewpointData {
     size_t gskel_size;
+    pcl::PointCloud<pcl::PointXYZ>::Ptr global_map;
     std::vector<Vertex> global_skel;
     std::vector<std::vector<int>> global_adj;
-    std::vector<Viewpoint> global_vpts;
     std::vector<int> updated_vertices;
-
     std::vector<std::vector<int>> branches;
+
+    std::vector<Viewpoint> global_vpts;
 };    
 
 
@@ -62,13 +66,15 @@ public:
     ViewpointManager(const ViewpointConfig &cfg);
     bool viewpoint_run();
     std::vector<Vertex>& input_skeleton() { return VD.global_skel; }
+    pcl::PointCloud<pcl::PointXYZ>& input_map() { return *VD.global_map; }
+    std::vector<Viewpoint>& output_vpts() { return VD.global_vpts; }
 
 private:
     /* Functions */
     bool fetch_updated_vertices();
     bool branch_extract();
-    bool branch_reduction();
 
+    bool build_all_vpts();
 
     bool viewpoint_sampling();
     bool viewpoint_filtering();
@@ -77,6 +83,10 @@ private:
     /* Helper */
     std::vector<int> walk_branch(int start_idx, int nb_idx, const std::vector<char>& allowed, std::unordered_set<std::pair<int,int>, PairHash>& visited_edges);
     std::vector<Viewpoint> generate_viewpoint(int id);
+    std::vector<Viewpoint> sample_vp(const Eigen::Vector3f& origin, const std::vector<Eigen::Vector3f>& directions, std::vector<float> dists, int vertex_id);
+
+    float distance_to_free_space(const Eigen::Vector3f& p, const Eigen::Vector3f dir_in);
+    bool map_occupied_at_index(int ix, int iy, int iz);
 
     /* Params */
     ViewpointConfig cfg_;
@@ -85,12 +95,15 @@ private:
     /* Data */
     ViewpointData VD;
 
+    std::shared_ptr<pcl::octree::OctreePointCloudOccupancy<pcl::PointXYZ>> octree_;
+
     std::unordered_map<int,int> vid2idx_;
     std::vector<int> idx2vid_;
     std::vector<int> degree_;
     std::vector<int> is_endpoint_;
 
     /* Utils */
+
 
 };
 

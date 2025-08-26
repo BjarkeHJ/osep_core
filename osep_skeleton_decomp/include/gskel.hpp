@@ -124,12 +124,8 @@ private:
     bool vertex_merge();
     bool prune();
     bool smooth_vertex_positions();
-    bool extract_branches();
-    bool vid_manager();
+    bool vid_manager();    
     
-    
-    // bool extract_branches();
-
     /* Helper */
     void build_cloud_from_vertices();
     void graph_decomp();
