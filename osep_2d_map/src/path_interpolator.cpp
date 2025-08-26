@@ -286,6 +286,51 @@ std::vector<geometry_msgs::msg::PoseStamped> PathInterpolator::reconstructPath(
 	return full_path;
 }
 
+// Helper: Moving average filter for path smoothing (window size 3), including yaw
+std::vector<geometry_msgs::msg::PoseStamped> PathInterpolator::movingAverageFilter(const std::vector<geometry_msgs::msg::PoseStamped>& path, int window) {
+	if (path.size() <= static_cast<size_t>(window)) {
+		return path;
+	}
+	std::vector<geometry_msgs::msg::PoseStamped> filtered;
+	filtered.reserve(path.size());
+	// Always keep the first point unchanged
+	filtered.push_back(path.front());
+	for (size_t i = 1; i + 1 < path.size(); ++i) {
+		// Only filter middle points
+		double sum_x = 0, sum_y = 0, sum_z = 0;
+		double sum_sin = 0, sum_cos = 0;
+		int count = 0;
+		for (int j = static_cast<int>(i) - window/2; j <= static_cast<int>(i) + window/2; ++j) {
+			if (j > 0 && j + 1 < static_cast<int>(path.size())) { // only use middle points for averaging
+				sum_x += path[j].pose.position.x;
+				sum_y += path[j].pose.position.y;
+				sum_z += path[j].pose.position.z;
+				tf2::Quaternion q;
+				tf2::fromMsg(path[j].pose.orientation, q);
+				double yaw = tf2::getYaw(q);
+				sum_sin += std::sin(yaw);
+				sum_cos += std::cos(yaw);
+				++count;
+			}
+		}
+		// If no valid neighbors, just copy the original
+		geometry_msgs::msg::PoseStamped avg = path[i];
+		if (count > 0) {
+			avg.pose.position.x = sum_x / count;
+			avg.pose.position.y = sum_y / count;
+			avg.pose.position.z = sum_z / count;
+			double avg_yaw = std::atan2(sum_sin / count, sum_cos / count);
+			tf2::Quaternion q_avg;
+			q_avg.setRPY(0, 0, avg_yaw);
+			avg.pose.orientation = tf2::toMsg(q_avg);
+		}
+		filtered.push_back(avg);
+	}
+	// Always keep the last point unchanged
+	filtered.push_back(path.back());
+	return filtered;
+}
+
 // Helper: Adjust path for collisions and downsample
 std::vector<geometry_msgs::msg::PoseStamped> PathInterpolator::adjustAndDownsamplePath(
 	const std::vector<geometry_msgs::msg::PoseStamped> &path) {
@@ -308,8 +353,12 @@ std::vector<geometry_msgs::msg::PoseStamped> PathInterpolator::adjustAndDownsamp
 	adjusted_full_path.erase(
 		std::remove_if(adjusted_full_path.begin(), adjusted_full_path.end(), is_invalid),
 		adjusted_full_path.end());
-	return downsamplePath(adjusted_full_path, interpolation_distance_);
+	std::vector<geometry_msgs::msg::PoseStamped> downsampled = downsamplePath(adjusted_full_path, interpolation_distance_);
+	// Apply moving average filter (window size 3)
+	return movingAverageFilter(downsampled, 3);
 }
+
+
 
 std::vector<geometry_msgs::msg::PoseStamped> PathInterpolator::planPath(
 	const geometry_msgs::msg::PoseStamped &start,

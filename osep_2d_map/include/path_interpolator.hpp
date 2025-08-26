@@ -119,4 +119,7 @@ private:
     // --- Smoothing helpers ---
     std::vector<double> cubicSplineInterp(const std::vector<double> &t, const std::vector<double> &values, const std::vector<double> &t_new, bool is_yaw);
     std::optional<geometry_msgs::msg::PoseStamped> findAdjustedViewpoint(const geometry_msgs::msg::PoseStamped &pose, double interpolation_distance);
+
+    // Moving average filter for path smoothing (window size, including yaw)
+    std::vector<geometry_msgs::msg::PoseStamped> movingAverageFilter(const std::vector<geometry_msgs::msg::PoseStamped>& path, int window);
 };
