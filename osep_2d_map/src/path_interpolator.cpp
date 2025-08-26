@@ -389,6 +389,53 @@ std::vector<geometry_msgs::msg::PoseStamped> PathInterpolator::downsamplePath(
 	return downsampled_path;
 }
 
+
+// Helper: Cubic spline interpolation for path smoothing
+std::vector<double> PathInterpolator::cubicSplineInterp(const std::vector<double> &t, const std::vector<double> &values, const std::vector<double> &t_new, bool is_yaw) {
+	std::vector<double> result(t_new.size());
+	for (size_t i = 0; i < t_new.size(); ++i) {
+		auto it = std::lower_bound(t.begin(), t.end(), t_new[i]);
+		size_t idx = std::distance(t.begin(), it);
+		if (idx == 0) {
+			result[i] = values[0];
+		} else if (idx >= t.size()) {
+			result[i] = values.back();
+		} else {
+			double t1 = t[idx - 1], t2 = t[idx];
+			double v1 = values[idx - 1], v2 = values[idx];
+			if (is_yaw) {
+				double delta_yaw = v2 - v1;
+				if (delta_yaw > M_PI) {
+					delta_yaw -= 2 * M_PI;
+				} else if (delta_yaw < -M_PI) {
+					delta_yaw += 2 * M_PI;
+				}
+				double interpolated_yaw = v1 + (delta_yaw * (t_new[i] - t1) / (t2 - t1));
+				result[i] = std::fmod(interpolated_yaw + M_PI, 2 * M_PI) - M_PI;
+			} else {
+				result[i] = v1 + (v2 - v1) * (t_new[i] - t1) / (t2 - t1);
+			}
+		}
+	}
+	return result;
+}
+
+// Helper: Find adjusted viewpoint close to pose
+std::optional<geometry_msgs::msg::PoseStamped> PathInterpolator::findAdjustedViewpoint(const geometry_msgs::msg::PoseStamped &pose, double interpolation_distance) {
+	auto adjusted_it = std::find_if(
+		adjusted_viewpoints_.poses.begin(), adjusted_viewpoints_.poses.end(),
+		[&pose, interpolation_distance](const geometry_msgs::msg::PoseStamped &adjusted_pose) {
+			return std::sqrt(
+				std::pow(pose.pose.position.x - adjusted_pose.pose.position.x, 2) +
+				std::pow(pose.pose.position.y - adjusted_pose.pose.position.y, 2) +
+				std::pow(pose.pose.position.z - adjusted_pose.pose.position.z, 2)) <= interpolation_distance;
+		});
+	if (adjusted_it != adjusted_viewpoints_.poses.end()) {
+		return *adjusted_it;
+	}
+	return std::nullopt;
+}
+
 std::vector<geometry_msgs::msg::PoseStamped> PathInterpolator::smoothPath(
 	const std::vector<geometry_msgs::msg::PoseStamped> &path, double interpolation_distance) {
 	if (path.size() < 2) {
@@ -416,38 +463,10 @@ std::vector<geometry_msgs::msg::PoseStamped> PathInterpolator::smoothPath(
 	for (int i = 0; i < num_points; ++i) {
 		t_new[i] = i * interpolation_distance;
 	}
-	auto cubicSpline = [](const std::vector<double> &t, const std::vector<double> &values, const std::vector<double> &t_new, bool is_yaw = false) {
-		std::vector<double> result(t_new.size());
-		for (size_t i = 0; i < t_new.size(); ++i) {
-			auto it = std::lower_bound(t.begin(), t.end(), t_new[i]);
-			size_t idx = std::distance(t.begin(), it);
-			if (idx == 0) {
-				result[i] = values[0];
-			} else if (idx >= t.size()) {
-				result[i] = values.back();
-			} else {
-				double t1 = t[idx - 1], t2 = t[idx];
-				double v1 = values[idx - 1], v2 = values[idx];
-				if (is_yaw) {
-					double delta_yaw = v2 - v1;
-					if (delta_yaw > M_PI) {
-						delta_yaw -= 2 * M_PI;
-					} else if (delta_yaw < -M_PI) {
-						delta_yaw += 2 * M_PI;
-					}
-					double interpolated_yaw = v1 + (delta_yaw * (t_new[i] - t1) / (t2 - t1));
-					result[i] = std::fmod(interpolated_yaw + M_PI, 2 * M_PI) - M_PI;
-				} else {
-					result[i] = v1 + (v2 - v1) * (t_new[i] - t1) / (t2 - t1);
-				}
-			}
-		}
-		return result;
-	};
-	std::vector<double> x_smooth = cubicSpline(t, x, t_new);
-	std::vector<double> y_smooth = cubicSpline(t, y, t_new);
-	std::vector<double> z_smooth = cubicSpline(t, z, t_new);
-	std::vector<double> yaw_smooth = cubicSpline(t, yaw, t_new, true);
+	std::vector<double> x_smooth = cubicSplineInterp(t, x, t_new, false);
+	std::vector<double> y_smooth = cubicSplineInterp(t, y, t_new, false);
+	std::vector<double> z_smooth = cubicSplineInterp(t, z, t_new, false);
+	std::vector<double> yaw_smooth = cubicSplineInterp(t, yaw, t_new, true);
 	std::vector<geometry_msgs::msg::PoseStamped> smoothed_path;
 	smoothed_path.push_back(path.front());
 	for (size_t i = 1; i < t_new.size(); ++i) {
@@ -459,16 +478,9 @@ std::vector<geometry_msgs::msg::PoseStamped> PathInterpolator::smoothPath(
 		tf2::Quaternion quaternion;
 		quaternion.setRPY(0, 0, yaw_smooth[i]);
 		pose.pose.orientation = tf2::toMsg(quaternion);
-		auto adjusted_it = std::find_if(
-			adjusted_viewpoints_.poses.begin(), adjusted_viewpoints_.poses.end(),
-			[&pose, interpolation_distance](const geometry_msgs::msg::PoseStamped &adjusted_pose) {
-				return std::sqrt(
-					std::pow(pose.pose.position.x - adjusted_pose.pose.position.x, 2) +
-					std::pow(pose.pose.position.y - adjusted_pose.pose.position.y, 2) +
-					std::pow(pose.pose.position.z - adjusted_pose.pose.position.z, 2)) <= interpolation_distance;
-			});
-		if (adjusted_it != adjusted_viewpoints_.poses.end()) {
-			smoothed_path.push_back(*adjusted_it);
+		auto adjusted = findAdjustedViewpoint(pose, interpolation_distance);
+		if (adjusted) {
+			smoothed_path.push_back(*adjusted);
 		} else {
 			smoothed_path.push_back(pose);
 		}

@@ -115,4 +115,8 @@ private:
         const std::vector<geometry_msgs::msg::PoseStamped> &path, double min_distance);
     std::vector<geometry_msgs::msg::PoseStamped> smoothPath(
         const std::vector<geometry_msgs::msg::PoseStamped> &path, double interpolation_distance);
+
+    // --- Smoothing helpers ---
+    std::vector<double> cubicSplineInterp(const std::vector<double> &t, const std::vector<double> &values, const std::vector<double> &t_new, bool is_yaw);
+    std::optional<geometry_msgs::msg::PoseStamped> findAdjustedViewpoint(const geometry_msgs::msg::PoseStamped &pose, double interpolation_distance);
 };
