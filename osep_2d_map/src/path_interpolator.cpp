@@ -60,7 +60,6 @@ PathInterpolator::PathInterpolator() : Node("planner") {
 }
 
 
-
 geometry_msgs::msg::PoseStamped PathInterpolator::getCurrentPosition() {
 	geometry_msgs::msg::PoseStamped current_position;
 	try {
@@ -155,7 +154,6 @@ tf2::Quaternion PathInterpolator::interpolateYaw(
 	interpolated_quat.setRPY(0, 0, interpolated_yaw);
 	return interpolated_quat;
 }
-
 
 std::vector<geometry_msgs::msg::PoseStamped> PathInterpolator::planPath(
 	const geometry_msgs::msg::PoseStamped &start,
@@ -404,66 +402,99 @@ std::vector<geometry_msgs::msg::PoseStamped> PathInterpolator::smoothPath(
 }
 
 // Callbacks starts here
+bool PathInterpolator::checkPathPreconditions() {
+    if (!costmap_ || adjusted_viewpoints_.poses.empty()) {
+        RCLCPP_ERROR(this->get_logger(), "Cannot plan path: costmap or trajectory path is missing");
+        return false;
+    }
+    return true;
+}
+
+geometry_msgs::msg::PoseStamped PathInterpolator::getValidCurrentPosition() {
+    geometry_msgs::msg::PoseStamped current_position = getCurrentPosition();
+    if (current_position.header.frame_id.empty()) {
+        RCLCPP_ERROR(this->get_logger(), "Failed to retrieve current position");
+    }
+    return current_position;
+}
+
+nav_msgs::msg::Path PathInterpolator::buildInitPath(const geometry_msgs::msg::PoseStamped& current_position) {
+    nav_msgs::msg::Path init_path;
+    init_path.header.stamp = this->now();
+    init_path.header.frame_id = costmap_->header.frame_id;
+    init_path.poses.push_back(current_position);
+    for (const auto &viewpoint : adjusted_viewpoints_.poses) {
+        init_path.poses.push_back(viewpoint);
+    }
+    return init_path;
+}
+
+bool PathInterpolator::planSegments(const nav_msgs::msg::Path& init_path, nav_msgs::msg::Path& raw_path, int& fail_idx) {
+    raw_path.header.stamp = this->now();
+    raw_path.header.frame_id = costmap_->header.frame_id;
+    for (size_t i = 0; i < init_path.poses.size() - 1 && i < 4; ++i) {
+        const auto &start = init_path.poses[i];
+        const auto &goal = init_path.poses[i + 1];
+        auto segment_path = planPath(start, goal);
+        if (segment_path.empty()) {
+            RCLCPP_ERROR(this->get_logger(), "Failed to plan a valid path segment between viewpoints %zu and %zu.", i, i + 1);
+            path_invalid_flag_ = true;
+            fail_idx = i;
+            return false;
+        }
+        path_invalid_flag_ = false;
+        raw_path.poses.insert(raw_path.poses.end(), segment_path.begin(), segment_path.end());
+    }
+    return true;
+}
+
+void PathInterpolator::handlePathFailure(const geometry_msgs::msg::PoseStamped& current_position) {
+    nav_msgs::msg::Path smoothed_path;
+    smoothed_path.header.stamp = this->now();
+    smoothed_path.header.frame_id = costmap_->header.frame_id;
+    geometry_msgs::msg::PoseStamped current_position_adjusted = adjustviewpointForCollision(current_position, extra_safety_distance_, costmap_->info.resolution, 10).first;
+    if (current_position_adjusted.header.frame_id.empty()) {
+        RCLCPP_ERROR(this->get_logger(), "Failed to adjust current position for collision-free zone");
+        nav_msgs::msg::Path empty_path;
+        empty_path.header.stamp = this->now();
+        empty_path.header.frame_id = "map";
+        smoothed_path_pub_->publish(empty_path);
+        return;
+    }
+    smoothed_path.poses.push_back(current_position_adjusted);
+    smoothed_path_pub_->publish(smoothed_path);
+}
+
+void PathInterpolator::publishPaths(const nav_msgs::msg::Path& raw_path) {
+    raw_path_pub_->publish(raw_path);
+    std::vector<geometry_msgs::msg::PoseStamped> smoothed_poses = smoothPath(raw_path.poses, interpolation_distance_);
+    nav_msgs::msg::Path smoothed_path;
+    smoothed_path.header.stamp = this->now();
+    smoothed_path.header.frame_id = costmap_->header.frame_id;
+    smoothed_path.poses = smoothed_poses;
+    smoothed_path_pub_->publish(smoothed_path);
+}
 
 void PathInterpolator::planAndPublishPath() {
-	if (!costmap_ || adjusted_viewpoints_.poses.empty()) {
-		RCLCPP_ERROR(this->get_logger(), "Cannot plan path: costmap or trajectory path is missing");
-		return;
-	}
-	geometry_msgs::msg::PoseStamped current_position = getCurrentPosition();
-	if (current_position.header.frame_id.empty()) {
-		RCLCPP_ERROR(this->get_logger(), "Failed to retrieve current position");
-		return;
-	}
+    if (!checkPathPreconditions())
+        return;
 
-	nav_msgs::msg::Path init_path;
-	init_path.header.stamp = this->now();
-	init_path.header.frame_id = costmap_->header.frame_id;
-	init_path.poses.push_back(current_position);
-	for (const auto &viewpoint : adjusted_viewpoints_.poses) {
-		init_path.poses.push_back(viewpoint);
-	}
-	nav_msgs::msg::Path raw_path;
-	raw_path.header.stamp = this->now();
-	raw_path.header.frame_id = costmap_->header.frame_id;
-	nav_msgs::msg::Path smoothed_path;
-	int idx = -1;
-	for (size_t i = 0; i < init_path.poses.size() - 1 && i < 4; ++i) {
-		const auto &start = init_path.poses[i];
-		const auto &goal = init_path.poses[i + 1];
-		auto segment_path = planPath(start, goal);
-		if (segment_path.empty()) {
-			RCLCPP_ERROR(this->get_logger(), "Failed to plan a valid path segment between viewpoints %zu and %zu.", i, i + 1);
-			path_invalid_flag_ = true;
-			idx = i;
-			break;
-		}
-		path_invalid_flag_ = false;
-		raw_path.poses.insert(raw_path.poses.end(), segment_path.begin(), segment_path.end());
-	}
-	if (path_invalid_flag_ && idx == 0) {
-		RCLCPP_ERROR(this->get_logger(), "Path planning failed. Marking the path as invalid and aborting.");
-		smoothed_path.header.stamp = this->now();
-		smoothed_path.header.frame_id = costmap_->header.frame_id;
-		geometry_msgs::msg::PoseStamped current_position_adjusted = adjustviewpointForCollision(current_position, extra_safety_distance_, costmap_->info.resolution, 10).first;
-		if (current_position_adjusted.header.frame_id.empty()) {
-			RCLCPP_ERROR(this->get_logger(), "Failed to adjust current position for collision-free zone");
-			nav_msgs::msg::Path empty_path;
-			empty_path.header.stamp = this->now();
-			empty_path.header.frame_id = "map";
-			smoothed_path_pub_->publish(empty_path);
-			return;
-		}
-		smoothed_path.poses.push_back(current_position_adjusted);
-		smoothed_path_pub_->publish(smoothed_path);
-		return;
-	}
-	raw_path_pub_->publish(raw_path);
-	std::vector<geometry_msgs::msg::PoseStamped> smoothed_poses = smoothPath(raw_path.poses, interpolation_distance_);
-	smoothed_path.header.stamp = this->now();
-	smoothed_path.header.frame_id = costmap_->header.frame_id;
-	smoothed_path.poses = smoothed_poses;
-	smoothed_path_pub_->publish(smoothed_path);
+    geometry_msgs::msg::PoseStamped current_position = getValidCurrentPosition();
+    if (current_position.header.frame_id.empty())
+        return;
+
+    nav_msgs::msg::Path init_path = buildInitPath(current_position);
+    nav_msgs::msg::Path raw_path;
+    int fail_idx = -1;
+
+    if (!planSegments(init_path, raw_path, fail_idx)) {
+        if (path_invalid_flag_ && fail_idx == 0) {
+            handlePathFailure(current_position);
+            return;
+        }
+    }
+
+    publishPaths(raw_path);
 }
 
 void PathInterpolator::costmapCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {

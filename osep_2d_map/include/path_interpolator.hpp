@@ -66,6 +66,12 @@ private:
     void viewpointsCallback(const nav_msgs::msg::Path::SharedPtr msg);
     void updateGroundTruthTrajectory();
     void planAndPublishPath();
+    bool checkPathPreconditions();
+    geometry_msgs::msg::PoseStamped getValidCurrentPosition();
+    nav_msgs::msg::Path buildInitPath(const geometry_msgs::msg::PoseStamped& current_position);
+    bool planSegments(const nav_msgs::msg::Path& init_path, nav_msgs::msg::Path& raw_path, int& fail_idx);
+    void handlePathFailure(const geometry_msgs::msg::PoseStamped& current_position);
+    void publishPaths(const nav_msgs::msg::Path& raw_path);
 
     // --- Utility Methods ---
     geometry_msgs::msg::PoseStamped getCurrentPosition();
