@@ -161,36 +161,39 @@ tf2::Quaternion PathInterpolator::interpolateYaw(
 
 // Helper: Interpolate and adjust intermediate points between start and goal
 std::vector<geometry_msgs::msg::PoseStamped> PathInterpolator::interpolateAndAdjust(
-	const geometry_msgs::msg::PoseStamped &start,
-	const geometry_msgs::msg::PoseStamped &goal,
-	bool &invalid_flag) {
-	std::vector<geometry_msgs::msg::PoseStamped> viewpoints = {start};
-	float distance = std::sqrt(
-		std::pow(goal.pose.position.x - start.pose.position.x, 2) +
-		std::pow(goal.pose.position.y - start.pose.position.y, 2) +
-		std::pow(goal.pose.position.z - start.pose.position.z, 2));
-	if (distance > interpolation_distance_) {
-		int num_intermediate_points = static_cast<int>(std::ceil(distance / interpolation_distance_));
-		for (int i = 1; i <= num_intermediate_points; ++i) {
-			float t = static_cast<float>(i) / (num_intermediate_points + 1);
-			geometry_msgs::msg::PoseStamped intermediate;
-			intermediate.header.frame_id = costmap_->header.frame_id;
-			intermediate.pose.position.x = start.pose.position.x + t * (goal.pose.position.x - start.pose.position.x);
-			intermediate.pose.position.y = start.pose.position.y + t * (goal.pose.position.y - start.pose.position.y);
-			intermediate.pose.position.z = start.pose.position.z + t * (goal.pose.position.z - start.pose.position.z);
-			tf2::Quaternion quaternion = interpolateYaw(start.pose, goal.pose, t);
-			intermediate.pose.orientation = tf2::toMsg(quaternion);
-			auto [adjusted_intermediate, was_adjusted] = adjustviewpointForCollision(intermediate, extra_safety_distance_, costmap_->info.resolution, 10);
-			if (adjusted_intermediate.header.frame_id.empty()) {
-				invalid_flag = true;
-				break;
-			} else if (was_adjusted) {
-				viewpoints.push_back(adjusted_intermediate);
-			}
-		}
-	}
-	viewpoints.push_back(goal);
-	return viewpoints;
+    const geometry_msgs::msg::PoseStamped &start,
+    const geometry_msgs::msg::PoseStamped &goal,
+    bool &invalid_flag) 
+{
+    float distance = std::sqrt(
+        std::pow(goal.pose.position.x - start.pose.position.x, 2) +
+        std::pow(goal.pose.position.y - start.pose.position.y, 2) +
+        std::pow(goal.pose.position.z - start.pose.position.z, 2));
+    int num_intermediate_points = (distance > interpolation_distance_)
+        ? static_cast<int>(std::ceil(distance / interpolation_distance_))
+        : 0;
+    std::vector<geometry_msgs::msg::PoseStamped> viewpoints;
+    viewpoints.reserve(2 + num_intermediate_points); // start, intermediates, goal
+    viewpoints.push_back(start);
+    for (int i = 1; i <= num_intermediate_points; ++i) {
+        float fraction = static_cast<float>(i) / (num_intermediate_points + 1);
+        geometry_msgs::msg::PoseStamped intermediate;
+        intermediate.header.frame_id = costmap_->header.frame_id;
+        intermediate.pose.position.x = start.pose.position.x + fraction * (goal.pose.position.x - start.pose.position.x);
+        intermediate.pose.position.y = start.pose.position.y + fraction * (goal.pose.position.y - start.pose.position.y);
+        intermediate.pose.position.z = start.pose.position.z + fraction * (goal.pose.position.z - start.pose.position.z);
+        tf2::Quaternion quaternion = interpolateYaw(start.pose, goal.pose, fraction);
+        intermediate.pose.orientation = tf2::toMsg(quaternion);
+        auto [adjusted_intermediate, was_adjusted] = adjustviewpointForCollision(intermediate, extra_safety_distance_, costmap_->info.resolution, 10);
+        if (adjusted_intermediate.header.frame_id.empty()) {
+            invalid_flag = true;
+            return viewpoints;
+        }
+        // Always add the valid intermediate (adjusted or not)
+        viewpoints.push_back(was_adjusted ? adjusted_intermediate : intermediate);
+    }
+    viewpoints.push_back(goal);
+    return viewpoints;
 }
 
 // Helper: A* search for 2D grid
