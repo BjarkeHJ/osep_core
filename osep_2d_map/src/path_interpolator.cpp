@@ -518,11 +518,16 @@ void PathInterpolator::viewpointsCallback(const nav_msgs::msg::Path::SharedPtr m
 		RCLCPP_WARN(this->get_logger(), "Received empty Path message");
 		return;
 	}
+
 	nav_msgs::msg::Path all_adjusted_viewpoints;
 	all_adjusted_viewpoints.header = msg->header;
 
 	adjusted_viewpoints_.header = msg->header;
 	adjusted_viewpoints_.poses.clear();
+
+	// Reserve space for efficiency
+	all_adjusted_viewpoints.poses.reserve(msg->poses.size());
+	adjusted_viewpoints_.poses.reserve(msg->poses.size());
 
 	for (const auto &pose : msg->poses) {
 		auto [adjusted_pose, _] = adjustviewpointForCollision(pose, extra_safety_distance_, costmap_->info.resolution, 5);
@@ -531,6 +536,7 @@ void PathInterpolator::viewpointsCallback(const nav_msgs::msg::Path::SharedPtr m
 			adjusted_viewpoints_.poses.push_back(adjusted_pose);
 		}
 	}
+
 	viewpoints_adjusted_pub_->publish(all_adjusted_viewpoints);
 }
 
