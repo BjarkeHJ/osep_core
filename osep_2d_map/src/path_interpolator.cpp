@@ -247,35 +247,41 @@ std::vector<geometry_msgs::msg::PoseStamped> PathInterpolator::reconstructPath(
 	std::unordered_map<int, int> &came_from,
 	std::unordered_map<int, float> &cost_so_far,
 	std::function<int(int, int)> toIndex) {
+	// Helper lambda to convert index to (x, y)
+	auto indexToXY = [width](int idx) {
+		return std::make_pair(idx % width, idx / width);
+	};
+
 	std::vector<geometry_msgs::msg::PoseStamped> full_path;
-	int current_index = toIndex(goal_x, goal_y);
-	float total_distance_2d = cost_so_far[toIndex(goal_x, goal_y)];
+	const int goal_index = toIndex(goal_x, goal_y);
+	const float total_distance_2d = cost_so_far.count(goal_index) ? cost_so_far.at(goal_index) : -1.0f;
 	if (total_distance_2d <= 0.0f) {
 		RCLCPP_ERROR(this->get_logger(), "Failed to calculate a valid path distance.");
 		return {};
 	}
+
+	int current_index = goal_index;
+	const float dz = goal.pose.position.z - start.pose.position.z;
+
+	// Reconstruct path backwards from goal to start
 	while (came_from.count(current_index)) {
-		int x = current_index % width;
-		int y = current_index / width;
+		const auto [x, y] = indexToXY(current_index);
 		geometry_msgs::msg::PoseStamped pose;
 		pose.header.frame_id = costmap_->header.frame_id;
 		pose.pose.position.x = x * resolution + costmap_->info.origin.position.x;
 		pose.pose.position.y = y * resolution + costmap_->info.origin.position.y;
-		float dz = goal.pose.position.z - start.pose.position.z;
-		float distance_to_start_2d = cost_so_far[current_index];
-		if (total_distance_2d > 0.0) {
-			float t = std::clamp(distance_to_start_2d / total_distance_2d, 0.0f, 1.0f);
-			pose.pose.position.z = start.pose.position.z + t * dz;
-			tf2::Quaternion quaternion = interpolateYaw(start.pose, goal.pose, t);
-			pose.pose.orientation = tf2::toMsg(quaternion);
-		} else {
-			pose.pose.position.z = start.pose.position.z + dz;
-			pose.pose.orientation = goal.pose.orientation;
-		}
-		full_path.push_back(pose);
+
+		const float distance_to_start_2d = cost_so_far.at(current_index);
+		const float t = std::clamp(total_distance_2d > 0.0f ? distance_to_start_2d / total_distance_2d : 1.0f, 0.0f, 1.0f);
+		pose.pose.position.z = start.pose.position.z + t * dz;
+		tf2::Quaternion quaternion = interpolateYaw(start.pose, goal.pose, t);
+		pose.pose.orientation = tf2::toMsg(quaternion);
+
+		full_path.emplace_back(std::move(pose));
 		current_index = came_from[current_index];
 	}
-	full_path.push_back(start);
+	// Add the start pose at the end (since we reconstruct backwards)
+	full_path.emplace_back(start);
 	std::reverse(full_path.begin(), full_path.end());
 	return full_path;
 }
@@ -285,7 +291,7 @@ std::vector<geometry_msgs::msg::PoseStamped> PathInterpolator::adjustAndDownsamp
 	const std::vector<geometry_msgs::msg::PoseStamped> &path) {
 	std::vector<geometry_msgs::msg::PoseStamped> adjusted_full_path;
 	for (const auto &pose : path) {
-		auto [adjusted_pose, was_adjusted] = adjustviewpointForCollision(pose, extra_safety_distance_, costmap_->info.resolution, 10);
+		auto [adjusted_pose, was_adjusted] = adjustviewpointForCollision(pose, extra_safety_distance_, costmap_->info.resolution, 3);
 		adjusted_full_path.push_back(adjusted_pose);
 	}
 	adjusted_full_path.erase(

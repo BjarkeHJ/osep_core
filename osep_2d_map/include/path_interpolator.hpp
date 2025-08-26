@@ -55,7 +55,7 @@ private:
 
     // --- Parameters and State ---
     std::string frame_id_;
-    static constexpr int obstacle_threshold_ = 50;
+    static constexpr int obstacle_threshold_ = 75;
     double interpolation_distance_;
     bool path_invalid_flag_ = false;
     double safety_distance_;
