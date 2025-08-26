@@ -73,6 +73,12 @@ private:
     void handlePathFailure(const geometry_msgs::msg::PoseStamped& current_position);
     void publishPaths(const nav_msgs::msg::Path& raw_path);
 
+    // Helper: Interpolate and adjust intermediate points between start and goal
+    std::vector<geometry_msgs::msg::PoseStamped> interpolateAndAdjust(
+        const geometry_msgs::msg::PoseStamped &start,
+        const geometry_msgs::msg::PoseStamped &goal,
+        bool &invalid_flag);
+
     // --- Utility Methods ---
     geometry_msgs::msg::PoseStamped getCurrentPosition();
     std::pair<geometry_msgs::msg::PoseStamped, bool> adjustviewpointForCollision(

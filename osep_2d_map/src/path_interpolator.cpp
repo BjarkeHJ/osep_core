@@ -1,4 +1,3 @@
-
 #include "path_interpolator.hpp"
 #include <chrono>
 #include <string>
@@ -160,21 +159,11 @@ tf2::Quaternion PathInterpolator::interpolateYaw(
 	return interpolated_quat;
 }
 
-std::vector<geometry_msgs::msg::PoseStamped> PathInterpolator::planPath(
+// Helper: Interpolate and adjust intermediate points between start and goal
+std::vector<geometry_msgs::msg::PoseStamped> PathInterpolator::interpolateAndAdjust(
 	const geometry_msgs::msg::PoseStamped &start,
-	const geometry_msgs::msg::PoseStamped &goal) {
-	if (!costmap_) {
-		RCLCPP_ERROR(this->get_logger(), "No costmap available");
-		return {};
-	}
-	bool invalid_flag = false;
-	int width = costmap_->info.width;
-	int height = costmap_->info.height;
-	float resolution = costmap_->info.resolution;
-	auto toIndex = [&](int x, int y) { return y * width + x; };
-	auto heuristic = [&](int x1, int y1, int x2, int y2) {
-		return std::sqrt(std::pow(x1 - x2, 2) + std::pow(y1 - y2, 2));
-	};
+	const geometry_msgs::msg::PoseStamped &goal,
+	bool &invalid_flag) {
 	std::vector<geometry_msgs::msg::PoseStamped> viewpoints = {start};
 	float distance = std::sqrt(
 		std::pow(goal.pose.position.x - start.pose.position.x, 2) +
@@ -191,21 +180,38 @@ std::vector<geometry_msgs::msg::PoseStamped> PathInterpolator::planPath(
 			intermediate.pose.position.z = start.pose.position.z + t * (goal.pose.position.z - start.pose.position.z);
 			tf2::Quaternion quaternion = interpolateYaw(start.pose, goal.pose, t);
 			intermediate.pose.orientation = tf2::toMsg(quaternion);
-			auto [adjusted_intermediate, was_adjusted] = adjustviewpointForCollision(intermediate, extra_safety_distance_, resolution, 10);
+			auto [adjusted_intermediate, was_adjusted] = adjustviewpointForCollision(intermediate, extra_safety_distance_, costmap_->info.resolution, 10);
 			if (adjusted_intermediate.header.frame_id.empty()) {
 				invalid_flag = true;
 				break;
-			} else {
-				if (was_adjusted) {
-					viewpoints.push_back(adjusted_intermediate);
-				}
+			} else if (was_adjusted) {
+				viewpoints.push_back(adjusted_intermediate);
 			}
 		}
 	}
 	viewpoints.push_back(goal);
-	if (!invalid_flag) {
-		return viewpoints;
+	return viewpoints;
+}
+
+std::vector<geometry_msgs::msg::PoseStamped> PathInterpolator::planPath(
+	const geometry_msgs::msg::PoseStamped &start,
+	const geometry_msgs::msg::PoseStamped &goal) {
+	if (!costmap_) {
+		RCLCPP_ERROR(this->get_logger(), "No costmap available");
+		return {};
 	}
+	   bool invalid_flag = false;
+	   int width = costmap_->info.width;
+	   int height = costmap_->info.height;
+	   float resolution = costmap_->info.resolution;
+	   auto toIndex = [&](int x, int y) { return y * width + x; };
+	   auto heuristic = [&](int x1, int y1, int x2, int y2) {
+		   return std::sqrt(std::pow(x1 - x2, 2) + std::pow(y1 - y2, 2));
+	   };
+	   std::vector<geometry_msgs::msg::PoseStamped> viewpoints = interpolateAndAdjust(start, goal, invalid_flag);
+	   if (!invalid_flag) {
+		   return viewpoints;
+	   }
 	std::vector<geometry_msgs::msg::PoseStamped> full_path;
 	if (viewpoints.size() < 2) {
 		RCLCPP_ERROR(this->get_logger(), "Not enough viewpoints to plan a path");
