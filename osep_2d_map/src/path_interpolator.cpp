@@ -220,13 +220,13 @@ bool PathInterpolator::aStarSearch(
 		for (const auto& dir : directions) {
 			int next_x = current.x + dir.first;
 			int next_y = current.y + dir.second;
-			if (next_x < 0 || next_y < 0 || next_x >= width || next_y >= height) {
+			// Bounds check
+			if (next_x < 0 || next_y < 0 || next_x >= width || next_y >= height)
 				continue;
-			}
 			int next_index = toIndex(next_x, next_y);
-			if (costmap_->data[next_index] > obstacle_threshold_) {
+			// Obstacle check
+			if (costmap_->data[next_index] > obstacle_threshold_)
 				continue;
-			}
 			float new_cost = cost_so_far[current_index] + 1;
 			if (!cost_so_far.count(next_index) || new_cost < cost_so_far[next_index]) {
 				cost_so_far[next_index] = new_cost;
