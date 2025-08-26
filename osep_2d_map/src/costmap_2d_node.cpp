@@ -185,7 +185,9 @@ void ESDF2dCostMapNode::erosion_filter(nav_msgs::msg::OccupancyGrid& local_map) 
                         }
                     }
                 }
-                if (zero_count >= 3) {
+                if (zero_count >= 5) {
+                    filtered[idx] = 0;
+                } else if (zero_count >= 3) {
                     if (local_map.data[idx] == 100) {
                         filtered[idx] = 50;
                     } else {
