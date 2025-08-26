@@ -357,19 +357,35 @@ std::vector<geometry_msgs::msg::PoseStamped> PathInterpolator::downsamplePath(
 	if (path.size() < 2) {
 		return path;
 	}
+
+	// Reserve space for efficiency (worst case: all points kept)
 	std::vector<geometry_msgs::msg::PoseStamped> downsampled_path;
-	downsampled_path.push_back(path.front());
+	downsampled_path.reserve(path.size());
+	downsampled_path.emplace_back(path.front());
+
+	// Lambda for Euclidean distance
+	auto euclidean_distance = [](const geometry_msgs::msg::Point &a, const geometry_msgs::msg::Point &b) {
+		return std::sqrt(
+			std::pow(a.x - b.x, 2) +
+			std::pow(a.y - b.y, 2) +
+			std::pow(a.z - b.z, 2));
+	};
+
 	for (size_t i = 1; i < path.size(); ++i) {
 		const auto &last_point = downsampled_path.back().pose.position;
 		const auto &current_point = path[i].pose.position;
-		double distance = std::sqrt(
-			std::pow(current_point.x - last_point.x, 2) +
-			std::pow(current_point.y - last_point.y, 2) +
-			std::pow(current_point.z - last_point.z, 2));
-		if (distance >= min_distance) {
-			downsampled_path.push_back(path[i]);
+		if (euclidean_distance(current_point, last_point) >= min_distance) {
+			downsampled_path.emplace_back(path[i]);
 		}
 	}
+
+	// Ensure the last point is included (if not already)
+	if (downsampled_path.back().pose.position.x != path.back().pose.position.x ||
+		downsampled_path.back().pose.position.y != path.back().pose.position.y ||
+		downsampled_path.back().pose.position.z != path.back().pose.position.z) {
+		downsampled_path.emplace_back(path.back());
+	}
+
 	return downsampled_path;
 }
 
