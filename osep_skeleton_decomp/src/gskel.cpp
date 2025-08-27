@@ -32,6 +32,8 @@ bool GSkel::gskel_run() {
     RUN_STEP(prune);
     RUN_STEP(smooth_vertex_positions);
 
+    // Keep small fusing distance -> Downsample to get sparser skeleton???
+
     // RUN_STEP(extract_branches);
     RUN_STEP(vid_manager);
     // auto te = std::chrono::high_resolution_clock::now();

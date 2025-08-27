@@ -78,7 +78,7 @@ GSkelNode::GSkelNode() : Node("GSkelNode") {
     // GSKEL
     gskel_cfg.gnd_th = declare_parameter<float>("gskel_gnd_th", 60.0f);
     gskel_cfg.fuse_dist_th = declare_parameter<float>("gskel_fuse_dist_th", 3.0f);
-    gskel_cfg.fuse_conf_th = declare_parameter<float>("gskel_fuse_conf_th", 1.0f);
+    gskel_cfg.fuse_conf_th = declare_parameter<float>("gskel_fuse_conf_th", 0.05f);
     gskel_cfg.lkf_pn = declare_parameter<float>("gskel_lkf_pn", 0.0001f);
     gskel_cfg.lkf_mn = declare_parameter<float>("gskel_lkf_mn", 0.1f);
     gskel_cfg.max_obs_wo_conf = declare_parameter<int>("gskel_max_obs_wo_conf", 5);

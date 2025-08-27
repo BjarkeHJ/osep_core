@@ -30,7 +30,7 @@ struct Viewpoint {
     Eigen::Vector3f position;
     Eigen::Quaternionf orientation;
 
-    int corresp_vertex_id = -1;
+    int target_vid = -1; // corresponding vertex id
     float score = 0.0f;
     bool in_path = false;
     bool visited = false;
@@ -48,6 +48,10 @@ struct Vertex {
     std::vector<Viewpoint> vpts; // Vertex viewpoints
 };
 
+struct VptHandle {
+    int vid; // Vertex id (in global_skel)
+    int idx; // Index inside that vertex's vpts vector
+};
 
 struct ViewpointData {
     size_t gskel_size;
@@ -58,7 +62,8 @@ struct ViewpointData {
     std::vector<std::vector<int>> branches;
 
     std::vector<Viewpoint> global_vpts;
-};    
+    std::vector<VptHandle> global_vpts_handles; // for referencing into each vertex viewpoints
+};
 
 
 class ViewpointManager {
@@ -67,27 +72,59 @@ public:
     bool viewpoint_run();
     std::vector<Vertex>& input_skeleton() { return VD.global_skel; }
     pcl::PointCloud<pcl::PointXYZ>& input_map() { return *VD.global_map; }
-    std::vector<Viewpoint>& output_vpts() { return VD.global_vpts; }
+    // std::vector<Viewpoint>& output_vpts() { return VD.global_vpts; }
+    std::vector<Vertex>& output_skeleton() { return VD.global_skel; }
 
 private:
     /* Functions */
     bool fetch_updated_vertices();
     bool branch_extract();
-
     bool build_all_vpts();
 
     bool viewpoint_sampling();
+
     bool viewpoint_filtering();
     bool viewpoint_visibility_graph();
 
     /* Helper */
     std::vector<int> walk_branch(int start_idx, int nb_idx, const std::vector<char>& allowed, std::unordered_set<std::pair<int,int>, PairHash>& visited_edges);
     std::vector<Viewpoint> generate_viewpoint(int id);
-    std::vector<Viewpoint> sample_vp(const Eigen::Vector3f& origin, const std::vector<Eigen::Vector3f>& directions, std::vector<float> dists, int vertex_id);
+    void build_local_frame(const int vid, Eigen::Vector3f& that, Eigen::Vector3f& n1hat, Eigen::Vector3f& n2hat);
+    float distance_to_free_space(const Eigen::Vector3f& p_in, const Eigen::Vector3f dir_in);
+    
+    /* Viewpoint Handle Helpers */
+    inline bool is_valid_handle(const VptHandle& h) {
+        return h.vid >= 0 && h.vid < static_cast<int>(VD.global_skel.size()) && h.idx >= 0 && h.idx < static_cast<int>(VD.global_skel[h.vid].vpts.size());
+    }
+    inline Viewpoint& get_vp_from_handle(const VptHandle& h) {
+        return VD.global_skel[h.vid].vpts[h.idx];
+    }
+    inline void erase_handles_for_vertex(int vid) {
+        VD.global_vpts_handles.erase(std::remove_if(VD.global_vpts_handles.begin(), VD.global_vpts_handles.end(), [vid](const VptHandle& h){ return h.vid == vid; }), VD.global_vpts_handles.end());
+    }
+    inline void append_handles_for_vertex(int vid) {
+        const auto& v = VD.global_skel[vid];
+        for (int j=0; j<(int)v.vpts.size(); ++j) {
+            VD.global_vpts_handles.push_back({vid, j});
+        }
+    }
 
-    float distance_to_free_space(const Eigen::Vector3f& p, const Eigen::Vector3f dir_in);
-    bool map_occupied_at_index(int ix, int iy, int iz);
+    /* Viewpoint Sampling Helpers */
+    inline float deg2rad(float d) { return d * float(M_PI) / 180.0f; }
+    inline float wrapPi(float a) {
+        float twoPi = 2.0f * float(M_PI);
+        float x = std::fmod(a + float(M_PI), twoPi);
+        if (x < 0) x += twoPi;
+        return x-float(M_PI);
+    }
 
+    inline float yaw_to_face(const Eigen::Vector3f& c, const Eigen::Vector3f& p) {
+        // yaw to face target p from camera c
+        Eigen::Vector2f d = (p.head<2>() - c.head<2>());
+        return std::atan2(d.y(), d.x());
+    }
+    inline Eigen::Quaternionf yaw_to_quat(float yaw) { return Eigen::Quaternionf(Eigen::AngleAxisf(yaw, Eigen::Vector3f::UnitZ())); }
+    
     /* Params */
     ViewpointConfig cfg_;
     bool running;
@@ -95,7 +132,8 @@ private:
     /* Data */
     ViewpointData VD;
 
-    std::shared_ptr<pcl::octree::OctreePointCloudOccupancy<pcl::PointXYZ>> octree_;
+    // std::shared_ptr<pcl::octree::OctreePointCloudOccupancy<pcl::PointXYZ>> octree_;
+    std::shared_ptr<pcl::octree::OctreePointCloudSearch<pcl::PointXYZ>> octree_;
 
     std::unordered_map<int,int> vid2idx_;
     std::vector<int> idx2vid_;

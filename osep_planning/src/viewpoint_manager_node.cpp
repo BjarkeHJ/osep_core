@@ -27,7 +27,8 @@ private:
     /* Functions */
     void skeleton_callback(MsgSkeleton::ConstSharedPtr vtx_msg);
     void map_callback(sensor_msgs::msg::PointCloud2::ConstSharedPtr pcd_msg);
-    void publish_viewpoints(const std::vector<Viewpoint>& viewpoints, std_msgs::msg::Header src_header);
+    // void publish_viewpoints(const std::vector<Viewpoint>& viewpoints, std_msgs::msg::Header src_header);
+    void publish_viewpoints(const std::vector<Vertex>& vertices, std_msgs::msg::Header src_header);
     void process_tick();
 
     /* ROS2 */
@@ -68,7 +69,7 @@ ViewpointNode::ViewpointNode() : Node("ViewpointManagerNode") {
     // VIEWPOINT MANAGER
 
     vpman_cfg.map_voxel_size = declare_parameter<float>("map_voxel_size", 1.0f);
-    vpman_cfg.vpt_disp_dist = declare_parameter<float>("vpt_displacement_dist", 10.0f);
+    vpman_cfg.vpt_disp_dist = declare_parameter<float>("vpt_displacement_dist", 12.0f);
 
     /* OBJECT INITIALIZATION */
     vpman_ = std::make_unique<ViewpointManager>(vpman_cfg);
@@ -105,24 +106,46 @@ void ViewpointNode::map_callback(sensor_msgs::msg::PointCloud2::ConstSharedPtr p
     return;
 }
 
-void ViewpointNode::publish_viewpoints(const std::vector<Viewpoint>& viewpoints, std_msgs::msg::Header src_header) {
-    if (viewpoints.empty()) return;
-
+// void ViewpointNode::publish_viewpoints(const std::vector<Viewpoint>& viewpoints, std_msgs::msg::Header src_header) {
+void ViewpointNode::publish_viewpoints(const std::vector<Vertex>& vertices, std_msgs::msg::Header src_header) {
+    if (vertices.empty()) return;
     geometry_msgs::msg::PoseArray vpts_msg;
     vpts_msg.header = src_header;
-
-    for (const auto& vp : viewpoints) {
-        geometry_msgs::msg::Pose vp_pose;
-        vp_pose.position.x = vp.position.x();
-        vp_pose.position.y = vp.position.y();
-        vp_pose.position.z = vp.position.z();
-        vp_pose.orientation.x = vp.orientation.x();
-        vp_pose.orientation.y = vp.orientation.y();
-        vp_pose.orientation.z = vp.orientation.z();
-        vp_pose.orientation.w = vp.orientation.w();
-        vpts_msg.poses.push_back(vp_pose);
+    
+    for (const auto& v : vertices) {
+        for (const auto& vp : v.vpts) {
+            if (vp.invalid) continue;
+            geometry_msgs::msg::Pose p;
+            p.position.x = vp.position.x();
+            p.position.y = vp.position.y();
+            p.position.z = vp.position.z();
+            // fill orientation if you have it:
+            p.orientation.x = vp.orientation.x();
+            p.orientation.y = vp.orientation.y();
+            p.orientation.z = vp.orientation.z();
+            p.orientation.w = vp.orientation.w();
+            vpts_msg.poses.emplace_back(std::move(p));
+        }
     }
     vp_pub_->publish(vpts_msg);
+    
+    // if (viewpoints.empty()) return;
+
+    // geometry_msgs::msg::PoseArray vpts_msg;
+    // vpts_msg.header = src_header;
+
+    // for (const auto& vp : viewpoints) {
+    //     geometry_msgs::msg::Pose vp_pose;
+    //     vp_pose.position.x = vp.position.x();
+    //     vp_pose.position.y = vp.position.y();
+    //     vp_pose.position.z = vp.position.z();
+    //     vp_pose.orientation.x = vp.orientation.x();
+    //     vp_pose.orientation.y = vp.orientation.y();
+    //     vp_pose.orientation.z = vp.orientation.z();
+    //     vp_pose.orientation.w = vp.orientation.w();
+    //     vpts_msg.poses.push_back(vp_pose);
+    // }
+    // vp_pub_->publish(vpts_msg);
 }
 
 
@@ -164,8 +187,10 @@ void ViewpointNode::process_tick() {
     
 
     if (vpman_->viewpoint_run()) {
-        auto& viewpoints = vpman_->output_vpts(); // fetch generated viewpoints
-        publish_viewpoints(viewpoints, map_msg->header);
+        // auto& viewpoints = vpman_->output_vpts(); // fetch generated viewpoints
+        // publish_viewpoints(viewpoints, map_msg->header);
+        auto& vertices = vpman_->output_skeleton(); // fetch generated viewpoints
+        publish_viewpoints(vertices, map_msg->header);
     }
 }
 

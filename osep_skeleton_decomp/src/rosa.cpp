@@ -162,6 +162,8 @@ bool Rosa::preprocess() {
         RD.nrms_->points[i].normal_y = nn.y();
         RD.nrms_->points[i].normal_z = nn.z();
     }
+
+    // TODO: Density filtering here!
     
     RD.pts_->width  = static_cast<uint32_t>(tmp_pn_ds_->points.size());
     RD.pts_->height = 1;
@@ -353,7 +355,8 @@ bool Rosa::drosa() {
             const float inv_m = 1.0f / static_cast<float>(active.size());
             mean_p *= inv_m;
             mean_n *= inv_m;
-            center_f = mean_p - mean_n * (0.5f * cfg_.max_proj_range);
+            // center_f = mean_p - mean_n * (0.5f * cfg_.max_proj_range);
+            center_f = mean_p - mean_n * cfg_.max_proj_range;
         }
         else {
             center_f = closest_projection_point(active);

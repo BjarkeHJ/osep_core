@@ -64,7 +64,8 @@ PlannerNode::PlannerNode() : Node("PlannerNode") {
     path_pub_ = this->create_publisher<nav_msgs::msg::Path>(path_topic_, pub_qos);
 
     tick_timer_ = create_wall_timer(std::chrono::milliseconds(tick_ms_), std::bind(&PlannerNode::process_tick, this));
-
+    
+    
 }
 
 void PlannerNode::viewpoints_callback(geometry_msgs::msg::PoseArray::ConstSharedPtr vpts_msg) {
