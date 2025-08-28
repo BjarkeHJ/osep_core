@@ -255,7 +255,7 @@ void LidarMapNode::pointcloud_callback(sensor_msgs::msg::PointCloud2::ConstShare
 }
 
 void LidarMapNode::publish_map() {
-    pcl::PointCloud<pcl::PointXYZ>::Ptr out(new pcl::PointCloud<pcl::PointXYZ>);
+     pcl::PointCloud<pcl::PointXYZ>::Ptr out(new pcl::PointCloud<pcl::PointXYZ>);
     out->reserve(grid_.size());
 
     {

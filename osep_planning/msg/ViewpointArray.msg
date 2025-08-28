@@ -1,2 +1,0 @@
-Viewpoint[] viewpoints
-
