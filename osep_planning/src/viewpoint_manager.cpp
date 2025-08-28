@@ -19,7 +19,7 @@ ViewpointManager::ViewpointManager(const ViewpointConfig& cfg) : cfg_(cfg) {
     octree_ = std::make_shared<pcl::octree::OctreePointCloudSearch<pcl::PointXYZ>>(cfg_.map_voxel_size);
 }
 
-void ViewpointManager::update_skeleton(std::vector<Vertex>& verts) {
+void ViewpointManager::update_skeleton(const std::vector<Vertex>& verts) {
     /* Updates skeleton in place with possible updates */
     const float POS_EPS2 = 1e-6;
 
@@ -31,44 +31,55 @@ void ViewpointManager::update_skeleton(std::vector<Vertex>& verts) {
         }
     }
 
-    // std::vector<char> seen(VD.gskel.size(), 0);
-
     for (const auto& vin : verts) {
         auto it = VD.gskel_vid2idx.find(vin.vid);
         if (it == VD.gskel_vid2idx.end()) {
-            // New
+            // New vertex (no viewpoints yet)
             Vertex vnew;
             vnew.vid = vin.vid;
             vnew.position = vin.position;
             vnew.type = vin.type;
-
             vnew.pos_update = true;
             vnew.type_update = true;
-
             vnew.nb_ids = vin.nb_ids;
-
             VD.gskel_vid2idx[vnew.vid] = static_cast<int>(VD.gskel.size());
             VD.gskel.push_back(std::move(vnew));
-            // seen.push_back(1);
             continue;
         }
-        else {
-            // Existing (Preserves sampled viewpoints!)
-            const int idx = it->second;
-            // seen[idx] = 1;
-            Vertex& vcur = VD.gskel[idx]; // by ref (mutate)
-            const Eigen::Vector3f p_old = vcur.position.getVector3fMap();
-            const Eigen::Vector3f p_new(vin.position.x, vin.position.y, vin.position.z);
-            const bool pos_changed = (p_old - p_new).squaredNorm() > POS_EPS2;
-            const bool type_changed = (vcur.type != vin.type);
+    
+        // Existing (Preserves sampled viewpoints!)
+        const int idx = it->second;
+        Vertex& vcur = VD.gskel[idx]; // by ref (mutate)
+        const Eigen::Vector3f p_old = vcur.position.getVector3fMap();
+        const Eigen::Vector3f p_new(vin.position.x, vin.position.y, vin.position.z);
+        const bool pos_changed = (p_old - p_new).squaredNorm() > POS_EPS2;
+        const bool type_changed = (vcur.type != vin.type);
 
-            vcur.type_update = vin.type_update || type_changed;
-            vcur.pos_update = vin.pos_update || pos_changed;
-            vcur.position = vin.position;
-            vcur.type = vin.type;
-            vcur.nb_ids = vin.nb_ids;
-        }
+        vcur.type_update = vin.type_update || type_changed;
+        vcur.pos_update = vin.pos_update || pos_changed;
+        vcur.position = vin.position;
+        vcur.type = vin.type;
+        vcur.nb_ids = vin.nb_ids;
     }
+
+    // If VID is missing from incoming set -> Prune it from the skeleton
+    std::unordered_set<int> incoming;
+    incoming.reserve(verts.size() * 2);
+    for (const auto& v : verts) incoming.insert(v.vid);
+
+    for (int i = (int)VD.gskel.size() - 1; i >= 0; --i) {
+        if (incoming.count(VD.gskel[i].vid)) continue; // Is still valid!
+
+        int last = (int)VD.gskel.size() - 1;
+        int erased_vid = VD.gskel[i].vid;
+        if (i != last) {
+            std::swap(VD.gskel[i], VD.gskel[last]);
+            VD.gskel_vid2idx[VD.gskel[i].vid] = i;
+        }
+        VD.gskel.pop_back();
+        VD.gskel_vid2idx.erase(erased_vid);
+    }
+    VD.gskel_size = (int)VD.gskel.size();
 }
 
 bool ViewpointManager::viewpoint_run() {
@@ -333,7 +344,6 @@ bool ViewpointManager::viewpoint_filtering() {
                 }
                 if (!fixed) {
                     vp.invalid = true;
-                    vp.deleted = true;
                     continue;
                 }
             }            
@@ -436,7 +446,8 @@ std::vector<Viewpoint> ViewpointManager::generate_viewpoint(int idx) {
         Viewpoint vp;
         vp.position = vp_pos;
         vp.yaw = yaw;
-        vp.orientation = yaw_to_quat(yaw); // maybe drop quat and use only yaw...
+        vp.orientation = yaw_to_quat(yaw);
+
         vp.target_vid = vertex.vid;
         vp.target_vp_pos = pos_id;
         vp.updated = true;

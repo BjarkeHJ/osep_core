@@ -1,12 +1,11 @@
 #ifndef VIEWPOINT_MANAGER_HPP_
 #define VIEWPOINT_MANAGER_HPP_
 
+#include "types.hpp"
+
 #include <iostream>
 #include <chrono>
-// #include <algorithm>
 #include <unordered_set>
-#include <pcl/common/common.h>
-#include <Eigen/Core>
 #include <pcl/octree/octree.h>
 
 #define RUN_STEP(fn) \
@@ -27,28 +26,7 @@ struct PairHash {
     }
 };
 
-struct Viewpoint {
-    Eigen::Vector3f position;
-    float yaw;
-    Eigen::Quaternionf orientation;
-    int target_vid = -1; // corresponding vertex id
-    int target_vp_pos = -1; // index of corresponding vertex vpts vector
-    float score = 0.0f;
-    bool updated = false;
-    bool invalid = false;
-    bool deleted = false;
-};
 
-struct Vertex {
-    int vid = -1;
-    std::vector<int> nb_ids;
-    pcl::PointXYZ position;
-    int type = 0;
-    bool pos_update = false;
-    bool type_update = false;
-
-    std::vector<Viewpoint> vpts; // Vertex viewpoints
-};
 
 struct VptHandle {
     int vid; // Vertex id (in gskel)
@@ -75,10 +53,10 @@ class ViewpointManager {
 public:
     ViewpointManager(const ViewpointConfig &cfg);
     bool viewpoint_run();
-    void update_skeleton(std::vector<Vertex>& verts);
 
     pcl::PointCloud<pcl::PointXYZ>& input_map() { return *VD.gmap; }
-    // std::vector<Viewpoint>& output_vpts() { return VD.global_vpts; }
+    void update_skeleton(const std::vector<Vertex>& verts);
+
     std::vector<Vertex>& output_skeleton() { return VD.gskel; }
 
 private:

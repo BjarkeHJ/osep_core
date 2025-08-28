@@ -11,16 +11,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Find ROS 2 + interface tooling
 find_package(ament_cmake REQUIRED)
-find_package(rosidl_default_generators REQUIRED)
-find_package(rosidl_default_runtime REQUIRED)
-
-# Message deps (these appear in your .msg files)
-find_package(std_msgs REQUIRED)
-find_package(geometry_msgs REQUIRED)
-find_package(builtin_interfaces REQUIRED)
 
 # Other deps for your nodes
 find_package(rclcpp REQUIRED)
+find_package(geometry_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_sensor_msgs REQUIRED)
@@ -40,49 +34,32 @@ set(dependencies
   nav_msgs
   osep_skeleton_decomp
 )
-rosidl_generate_interfaces(${PROJECT_NAME}
-  "msg/Viewpoint.msg"
-  "msg/ViewpointSet.msg"
-  DEPENDENCIES std_msgs geometry_msgs builtin_interfaces
-)
-ament_export_dependencies(rosidl_default_runtime)
 
 # Define executable
 set(EXEC_PLAN osep_planner)
-set(EXEC_VIEW osep_viewpoint_manager)
 add_executable(${EXEC_PLAN}
                 src/planner_node.cpp
+                src/viewpoint_manager.cpp
                 src/planner.cpp)
 
-add_executable(${EXEC_VIEW}
-                src/viewpoint_manager_node.cpp
-                src/viewpoint_manager.cpp)
 
-foreach(tgt IN ITEMS ${EXEC_PLAN} ${EXEC_VIEW})
+target_include_directories(${EXEC_PLAN} PUBLIC
+                        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+                        $<INSTALL_INTERFACE:include>
+                        ${PCL_INCLUDE_DIRS})
 
-        target_include_directories(${tgt} PUBLIC
-                                $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-                                $<INSTALL_INTERFACE:include>
-                                ${PCL_INCLUDE_DIRS})
+target_link_libraries(${EXEC_PLAN} 
+                        ${PCL_LIBRARIES} 
+                        Eigen3::Eigen)
 
-        target_link_libraries(${tgt} 
-                                ${PCL_LIBRARIES} 
-                                Eigen3::Eigen)
+ament_target_dependencies(${EXEC_PLAN} 
+                        ${dependencies})
 
-        ament_target_dependencies(${tgt} 
-                                ${dependencies})
-
-        target_compile_features(${tgt} 
-                                PUBLIC cxx_std_17)
-        
-        rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_cpp")
-        target_link_libraries(${tgt} ${cpp_typesupport_target})
-
-endforeach()
+target_compile_features(${EXEC_PLAN} 
+                        PUBLIC cxx_std_17)
 
 install(TARGETS 
         ${EXEC_PLAN}
-        ${EXEC_VIEW} 
         DESTINATION lib/${PROJECT_NAME})
 
 install(DIRECTORY include/
