@@ -3,6 +3,7 @@
 
 #include <iostream>
 #include <chrono>
+// #include <algorithm>
 #include <unordered_set>
 #include <pcl/common/common.h>
 #include <Eigen/Core>
@@ -28,13 +29,14 @@ struct PairHash {
 
 struct Viewpoint {
     Eigen::Vector3f position;
+    float yaw;
     Eigen::Quaternionf orientation;
-
     int target_vid = -1; // corresponding vertex id
+    int target_vp_pos = -1; // index of corresponding vertex vpts vector
     float score = 0.0f;
-    bool in_path = false;
-    bool visited = false;
+    bool updated = false;
     bool invalid = false;
+    bool deleted = false;
 };
 
 struct Vertex {
@@ -49,18 +51,21 @@ struct Vertex {
 };
 
 struct VptHandle {
-    int vid; // Vertex id (in global_skel)
+    int vid; // Vertex id (in gskel)
     int idx; // Index inside that vertex's vpts vector
 };
 
 struct ViewpointData {
     size_t gskel_size;
-    pcl::PointCloud<pcl::PointXYZ>::Ptr global_map;
-    std::vector<Vertex> global_skel;
-    std::vector<std::vector<int>> global_adj;
+    std::vector<Vertex> gskel;
+    std::unordered_map<int,int> gskel_vid2idx;
+    
+    std::vector<std::vector<int>> gadj;
     std::vector<int> updated_vertices;
     std::vector<std::vector<int>> branches;
 
+    pcl::PointCloud<pcl::PointXYZ>::Ptr gmap;
+    
     std::vector<Viewpoint> global_vpts;
     std::vector<VptHandle> global_vpts_handles; // for referencing into each vertex viewpoints
 };
@@ -70,20 +75,22 @@ class ViewpointManager {
 public:
     ViewpointManager(const ViewpointConfig &cfg);
     bool viewpoint_run();
-    std::vector<Vertex>& input_skeleton() { return VD.global_skel; }
-    pcl::PointCloud<pcl::PointXYZ>& input_map() { return *VD.global_map; }
+    void update_skeleton(std::vector<Vertex>& verts);
+
+    pcl::PointCloud<pcl::PointXYZ>& input_map() { return *VD.gmap; }
     // std::vector<Viewpoint>& output_vpts() { return VD.global_vpts; }
-    std::vector<Vertex>& output_skeleton() { return VD.global_skel; }
+    std::vector<Vertex>& output_skeleton() { return VD.gskel; }
 
 private:
     /* Functions */
-    bool fetch_updated_vertices();
+    bool fetch_updates();
     bool branch_extract();
     bool build_all_vpts();
 
     bool viewpoint_sampling();
-
     bool viewpoint_filtering();
+    bool viewpoint_scoring();
+
     bool viewpoint_visibility_graph();
 
     /* Helper */
@@ -91,19 +98,19 @@ private:
     std::vector<Viewpoint> generate_viewpoint(int id);
     void build_local_frame(const int vid, Eigen::Vector3f& that, Eigen::Vector3f& n1hat, Eigen::Vector3f& n2hat);
     float distance_to_free_space(const Eigen::Vector3f& p_in, const Eigen::Vector3f dir_in);
-    
+
     /* Viewpoint Handle Helpers */
     inline bool is_valid_handle(const VptHandle& h) {
-        return h.vid >= 0 && h.vid < static_cast<int>(VD.global_skel.size()) && h.idx >= 0 && h.idx < static_cast<int>(VD.global_skel[h.vid].vpts.size());
+        return h.vid >= 0 && h.vid < static_cast<int>(VD.gskel.size()) && h.idx >= 0 && h.idx < static_cast<int>(VD.gskel[h.vid].vpts.size());
     }
     inline Viewpoint& get_vp_from_handle(const VptHandle& h) {
-        return VD.global_skel[h.vid].vpts[h.idx];
+        return VD.gskel[h.vid].vpts[h.idx];
     }
     inline void erase_handles_for_vertex(int vid) {
         VD.global_vpts_handles.erase(std::remove_if(VD.global_vpts_handles.begin(), VD.global_vpts_handles.end(), [vid](const VptHandle& h){ return h.vid == vid; }), VD.global_vpts_handles.end());
     }
     inline void append_handles_for_vertex(int vid) {
-        const auto& v = VD.global_skel[vid];
+        const auto& v = VD.gskel[vid];
         for (int j=0; j<(int)v.vpts.size(); ++j) {
             VD.global_vpts_handles.push_back({vid, j});
         }
@@ -117,14 +124,17 @@ private:
         if (x < 0) x += twoPi;
         return x-float(M_PI);
     }
-
     inline float yaw_to_face(const Eigen::Vector3f& c, const Eigen::Vector3f& p) {
         // yaw to face target p from camera c
         Eigen::Vector2f d = (p.head<2>() - c.head<2>());
         return std::atan2(d.y(), d.x());
     }
     inline Eigen::Quaternionf yaw_to_quat(float yaw) { return Eigen::Quaternionf(Eigen::AngleAxisf(yaw, Eigen::Vector3f::UnitZ())); }
-    
+    inline bool is_not_safe_dist(const Eigen::Vector3f& p) {
+        std::vector<int> ids; std::vector<float> d2s; pcl::PointXYZ qp(p.x(), p.y(), p.z());
+        return octree_->radiusSearch(qp, cfg_.vpt_disp_dist, ids, d2s) > 0;
+    }
+
     /* Params */
     ViewpointConfig cfg_;
     bool running;

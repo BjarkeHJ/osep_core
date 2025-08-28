@@ -17,7 +17,6 @@ TODO: Publish branch segments ??
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <tf2_sensor_msgs/tf2_sensor_msgs.hpp>
 #include <visualization_msgs/msg/marker.hpp>
-// #include <visualization_msgs/msg/marker_array.hpp>
 
 #include "osep_skeleton_decomp/msg/vertex.hpp"
 #include "osep_skeleton_decomp/msg/global_skeleton.hpp"

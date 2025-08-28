@@ -15,9 +15,13 @@ ROS2 Node for Viewpoint managing
 
 #include "osep_skeleton_decomp/msg/vertex.hpp"
 #include "osep_skeleton_decomp/msg/global_skeleton.hpp"
+#include "osep_planning/msg/viewpoint.hpp"
+#include "osep_planning/msg/viewpoint_set.hpp"
 
 using MsgVertex = osep_skeleton_decomp::msg::Vertex;
 using MsgSkeleton = osep_skeleton_decomp::msg::GlobalSkeleton;
+using MsgViewpoint = osep_planning::msg::Viewpoint;
+using MsgViewpointSet = osep_planning::msg::ViewpointSet;
 
 class ViewpointNode : public rclcpp::Node {
 public:
@@ -36,7 +40,8 @@ private:
     /* ROS2 */
     rclcpp::Subscription<MsgSkeleton>::SharedPtr skel_sub_;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr map_sub_;
-    rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr vp_pub_; // publish viewpoint message
+    rclcpp::Publisher<MsgViewpointSet>::SharedPtr vp_pub_; // publish viewpoint message
+
     rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr all_vp_pub_; // vis
     rclcpp::TimerBase::SharedPtr tick_timer_;
 
@@ -66,7 +71,7 @@ ViewpointNode::ViewpointNode() : Node("ViewpointManagerNode") {
 
     costmap_topic_ = declare_parameter<std::string>("costmap_topic", "/osep/local_costmap/costmap");
     vp_topic_ = declare_parameter<std::string>("viewpoint_topic", "/osep/viewpoint_manager/viewpoints");
-    all_vp_topic_ = declare_parameter<std::string>("viewpoint_topic", "/osep/viewpoint_manager/all_viewpoints");
+    all_vp_topic_ = declare_parameter<std::string>("all_viewpoint_topic", "/osep/viewpoint_manager/all_viewpoints");
     map_topic_ = declare_parameter<std::string>("map_topic", "/osep/lidar_map/global_map");
     tick_ms_ = declare_parameter<int>("tick_ms", 50);
     global_frame_id_ = declare_parameter<std::string>("global_frame_id", "odom");
@@ -90,7 +95,7 @@ ViewpointNode::ViewpointNode() : Node("ViewpointManagerNode") {
     auto pub_qos = rclcpp::QoS(rclcpp::KeepLast(1));
     pub_qos.reliable().transient_local();
 
-    vp_pub_  = this->create_publisher<geometry_msgs::msg::PoseArray>(vp_topic_, pub_qos);
+    vp_pub_  = this->create_publisher<MsgViewpointSet>(vp_topic_, pub_qos);
     all_vp_pub_  = this->create_publisher<geometry_msgs::msg::PoseArray>(all_vp_topic_, pub_qos);
     
     tick_timer_ = create_wall_timer(std::chrono::milliseconds(tick_ms_), std::bind(&ViewpointNode::process_tick, this));
@@ -109,6 +114,37 @@ void ViewpointNode::map_callback(sensor_msgs::msg::PointCloud2::ConstSharedPtr p
     std::scoped_lock lk(latest_mutex_);
     latest_map_msg_ = std::move(pcd_msg);
     return;
+}
+
+void ViewpointNode::publish_viewpoints(const std::vector<Vertex>& vertices, const std_msgs::msg::Header& src_header) {
+    MsgViewpointSet vpset_msg;;
+    vpset_msg.header = src_header;
+
+    for (const auto& v : vertices) {
+        for (const auto& vp : v.vpts) {
+            if (!vp.updated) continue;
+            
+            MsgViewpoint vp_msg;
+            vp_msg.vid = vp.target_vid; // vertex id
+            vp_msg.vp_pos_id = vp.target_vp_pos; // index in vertex viewpoint vector
+            
+            if (vp.deleted) {
+                vp_msg.deleted = true;
+            }
+
+            vp_msg.deleted = false;
+            vp_msg.position.x = vp.position.x();
+            vp_msg.position.y = vp.position.y();
+            vp_msg.position.z = vp.position.z();
+            vp_msg.yaw = vp.yaw;
+            
+            // Eigen::Quaternionf ori = vp.orientation;
+            // Eigen::Matrix3f R = ori.toRotationMatrix();
+            // const float yaw = std::atan2(R(1,0), R(0,0));
+            vpset_msg.viewpoints.push_back(vp_msg);
+        }
+    }
+    vp_pub_->publish(vpset_msg);
 }
 
 void ViewpointNode::publish_all_viewpoints(const std::vector<Vertex>& vertices, const std_msgs::msg::Header& src_header) {
@@ -149,8 +185,8 @@ void ViewpointNode::process_tick() {
 
     if (!msg || !map_msg) return;
 
-    auto& skel = vpman_->input_skeleton();
-    skel.clear();
+    // auto& skel = vpman_->input_skeleton();
+    std::vector<Vertex> skel;
     skel.reserve(msg->vertices.size());
     for (const auto& mv : msg->vertices) {
         Vertex v;
@@ -168,16 +204,17 @@ void ViewpointNode::process_tick() {
         }
         skel.push_back(v);
     }
+    vpman_->update_skeleton(skel); // update in place 
 
     auto& map = vpman_->input_map();
     pcl::fromROSMsg(*map_msg, map);
     
-
     if (vpman_->viewpoint_run()) {
         // auto& viewpoints = vpman_->output_vpts(); // fetch generated viewpoints
         // publish_viewpoints(viewpoints, map_msg->header);
         auto& vertices = vpman_->output_skeleton(); // fetch generated viewpoints
         publish_all_viewpoints(vertices, map_msg->header);
+        publish_viewpoints(vertices, map_msg->header);
     }
 }
 

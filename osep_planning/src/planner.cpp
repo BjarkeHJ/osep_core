@@ -13,11 +13,21 @@ PathPlanner::PathPlanner(const PlannerConfig& cfg) : cfg_(cfg) {
 bool PathPlanner::planner_run() {
     RUN_STEP(generate_path);
 
+    std::cout << "Planner: Updated viewpoints size: " << PD.updated_viewpoints.size() << std::endl;
+
     return running;
 }
 
+bool PathPlanner::handle_viewpoints() {
+    for (const auto& vp : PD.updated_viewpoints) {
+        //
+    }
+
+    return 1;
+}
+
+
 bool PathPlanner::generate_path() {
-    if (PD.all_vpts.empty()) return 0; // no viewpoints to plan from
     
 
     return 1;

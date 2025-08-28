@@ -9,42 +9,99 @@ TODO: Incorporate 2d_local_costmap into the viewpoint sampling process.
 #include "viewpoint_manager.hpp"
 
 ViewpointManager::ViewpointManager(const ViewpointConfig& cfg) : cfg_(cfg) {
-    VD.global_map.reset(new pcl::PointCloud<pcl::PointXYZ>);
-    VD.global_map->points.reserve(50000);
-    VD.global_skel.reserve(1000);
+    VD.gmap.reset(new pcl::PointCloud<pcl::PointXYZ>);
+    VD.gmap->points.reserve(50000);
+    VD.gskel.reserve(1000);
     VD.global_vpts.reserve(5000);
     VD.updated_vertices.reserve(100);
     running = 1;
 
-    // octree_ = std::make_shared<pcl::octree::OctreePointCloudOccupancy<pcl::PointXYZ>>(cfg_.map_voxel_size);
     octree_ = std::make_shared<pcl::octree::OctreePointCloudSearch<pcl::PointXYZ>>(cfg_.map_voxel_size);
 }
 
-bool ViewpointManager::viewpoint_run() {
-    VD.gskel_size = VD.global_skel.size();
-    RUN_STEP(fetch_updated_vertices);
+void ViewpointManager::update_skeleton(std::vector<Vertex>& verts) {
+    /* Updates skeleton in place with possible updates */
+    const float POS_EPS2 = 1e-6;
 
-    for (int i=0; i<static_cast<int>(VD.global_skel.size()); ++i) {
-        if (i != VD.global_skel[i].vid) {
+    // rebuild if out-of-synch
+    if (VD.gskel_vid2idx.size() != VD.gskel.size()) {
+        VD.gskel_vid2idx.clear();
+        for (int i=0; i<(int)VD.gskel.size(); ++i) {
+            VD.gskel_vid2idx[VD.gskel[i].vid] = i;
+        }
+    }
+
+    // std::vector<char> seen(VD.gskel.size(), 0);
+
+    for (const auto& vin : verts) {
+        auto it = VD.gskel_vid2idx.find(vin.vid);
+        if (it == VD.gskel_vid2idx.end()) {
+            // New
+            Vertex vnew;
+            vnew.vid = vin.vid;
+            vnew.position = vin.position;
+            vnew.type = vin.type;
+
+            vnew.pos_update = true;
+            vnew.type_update = true;
+
+            vnew.nb_ids = vin.nb_ids;
+
+            VD.gskel_vid2idx[vnew.vid] = static_cast<int>(VD.gskel.size());
+            VD.gskel.push_back(std::move(vnew));
+            // seen.push_back(1);
+            continue;
+        }
+        else {
+            // Existing (Preserves sampled viewpoints!)
+            const int idx = it->second;
+            // seen[idx] = 1;
+            Vertex& vcur = VD.gskel[idx]; // by ref (mutate)
+            const Eigen::Vector3f p_old = vcur.position.getVector3fMap();
+            const Eigen::Vector3f p_new(vin.position.x, vin.position.y, vin.position.z);
+            const bool pos_changed = (p_old - p_new).squaredNorm() > POS_EPS2;
+            const bool type_changed = (vcur.type != vin.type);
+
+            vcur.type_update = vin.type_update || type_changed;
+            vcur.pos_update = vin.pos_update || pos_changed;
+            vcur.position = vin.position;
+            vcur.type = vin.type;
+            vcur.nb_ids = vin.nb_ids;
+        }
+    }
+}
+
+bool ViewpointManager::viewpoint_run() {
+    VD.gskel_size = VD.gskel.size();
+    RUN_STEP(fetch_updates);
+
+    for (int i=0; i<static_cast<int>(VD.gskel.size()); ++i) {
+        if (i != VD.gskel[i].vid) {
             std::cout << "PROBLEM!!!!" << std::endl;
         }
     }
 
     RUN_STEP(branch_extract);
     RUN_STEP(viewpoint_sampling);
-    RUN_STEP(build_all_vpts);
+    RUN_STEP(viewpoint_filtering);
+    // RUN_STEP(build_all_vpts);
 
     // std::cout << "Viewpoints size: " << VD.global_vpts.size() << std::endl;
 
     return running;
 }
 
-bool ViewpointManager::fetch_updated_vertices() {
+bool ViewpointManager::fetch_updates() {
     if (VD.gskel_size == 0) return 0;
     VD.updated_vertices.clear();
-    for (const auto& v : VD.global_skel) {
+    for (auto& v : VD.gskel) {
         if (v.pos_update || v.type_update) {
             VD.updated_vertices.push_back(v.vid);
+        }
+
+        // Set viewpoint not updated...
+        for (auto& vp : v.vpts) {
+            vp.updated = false;
         }
     }
 
@@ -56,17 +113,17 @@ bool ViewpointManager::fetch_updated_vertices() {
     idx2vid_.assign(N, -1);
     
     for (int i=0; i<N; ++i) {
-        vid2idx_[VD.global_skel[i].vid] = i;
-        idx2vid_[i] = VD.global_skel[i].vid;
+        vid2idx_[VD.gskel[i].vid] = i;
+        idx2vid_[i] = VD.gskel[i].vid;
     }
     
-    VD.global_adj.assign(N, {});
+    VD.gadj.assign(N, {});
     degree_.assign(N,0);
     is_endpoint_.assign(N,0);
 
     for (int i=0; i<N; ++i) {
-        const auto& nbs = VD.global_skel[i].nb_ids;
-        auto& out = VD.global_adj[i];
+        const auto& nbs = VD.gskel[i].nb_ids;
+        auto& out = VD.gadj[i];
         out.reserve(nbs.size());
         for (int nb_vid : nbs) {
             auto it = vid2idx_.find(nb_vid);
@@ -81,10 +138,18 @@ bool ViewpointManager::fetch_updated_vertices() {
         is_endpoint_[i] = (d == 1 || d > 2) ? 1 : 0;
     }
 
-    octree_->setInputCloud(VD.global_map);
+    // Update octree map bounds...
+    Eigen::Vector4f minpt, maxpt;
+    pcl::getMinMax3D(*VD.gmap, minpt, maxpt);
+    const float pad = std::max({ cfg_.vpt_disp_dist, 1.1f * 20.0f, 2.0f * static_cast<float>(octree_->getResolution()) });
+
+    octree_->deleteTree();
+    octree_->setInputCloud(VD.gmap);
+    octree_->defineBoundingBox(
+        minpt.x() - pad, minpt.y() - pad, minpt.z() - pad,
+        maxpt.x() + pad, maxpt.y() + pad, maxpt.z() + pad
+    );
     octree_->addPointsFromInputCloud();
-    // octree_->deleteTree();
-    // octree_->addPointsFromInputCloud();
 
     return 1;
 }
@@ -115,7 +180,7 @@ bool ViewpointManager::branch_extract() {
 
         for (int i=0; i<N; ++i) {
             if (!is_endpoint_[i]) continue; // start at endpoint
-            for (int nb_i : VD.global_adj[i]) {
+            for (int nb_i : VD.gadj[i]) {
                 auto br = walk_branch(i, nb_i, allowed, visited);
                 if (!br.empty()) {
                     const bool enough_vers = (static_cast<int>(br.size()) - 1) >= branch_min_vers_;
@@ -142,7 +207,7 @@ bool ViewpointManager::branch_extract() {
     // Seed the region with updated vertices and their neighbors
     for (int ui : updated_idxs) {
         push_idx(ui);
-        for (int nb_i : VD.global_adj[ui]) {
+        for (int nb_i : VD.gadj[ui]) {
             push_idx(nb_i);
         }
     }
@@ -152,7 +217,7 @@ bool ViewpointManager::branch_extract() {
         int i = stack.back();
         stack.pop_back();
         if (is_endpoint_[i]) continue; // stop expanding the region at an endpoint (reached depth in search - trace back)
-        for (int nb_i : VD.global_adj[i]) {
+        for (int nb_i : VD.gadj[i]) {
             push_idx(nb_i);
         }
     }
@@ -177,7 +242,7 @@ bool ViewpointManager::branch_extract() {
     region_edges.reserve(8 * (int)updated_idxs.size() + 64);
     for (int i=0; i<N; ++i) {
         if (!in_region[i]) continue; // focus on the region (skip non-update areas)
-        for (int j : VD.global_adj[i]) {
+        for (int j : VD.gadj[i]) {
             if (!in_region[j]) continue;
             if (j <= i) continue; // avoid duplicate edges (undirected...)
             region_edges.insert(edge_key(i,j));
@@ -213,7 +278,7 @@ bool ViewpointManager::branch_extract() {
     for (int i=0; i<N; ++i) {
         if (!in_region[i]) continue;
         if (!is_endpoint_[i]) continue;
-        for (int nb_i : VD.global_adj[i]) {
+        for (int nb_i : VD.gadj[i]) {
             // if (!in_region[nb_i]) continue;
             auto br = walk_branch(i, nb_i, in_region, visited_local);
             if (!br.empty()) {
@@ -226,8 +291,10 @@ bool ViewpointManager::branch_extract() {
 }
 
 bool ViewpointManager::viewpoint_sampling() {
+    // Check all vertices -> Sample viewpoint if vertex has changed or no Viewpoints
+
     for (int i=0; i<static_cast<int>(VD.gskel_size); ++i) {
-        auto& vertex = VD.global_skel[i];
+        auto& vertex = VD.gskel[i];
         if (vertex.vid != (int)i) std::cout << "WARNING: VID DOES NOT MATCH SKEL INDEX!" << std::endl;
 
         const bool need_resample = (vertex.type_update || vertex.pos_update || vertex.vpts.empty());
@@ -242,16 +309,48 @@ bool ViewpointManager::viewpoint_sampling() {
 
         vertex.type_update = false;
         vertex.pos_update = false;
-
     }
+    return 1;
+}
+
+bool ViewpointManager::viewpoint_filtering() {
+    // Check every viewpoint each time for occlusion -> Invalidate if conflict
+    for (auto& v : VD.gskel) {
+        for (auto& vp : v.vpts) {
+            // Viewpoint check
+            if (is_not_safe_dist(vp.position)) {
+                const Eigen::Vector3f dir(std::cos(vp.yaw), std::sin(vp.yaw), 0.0f);
+                const float step = std::max(0.5f * static_cast<float>(octree_->getResolution()), 0.05f);
+                bool fixed = false;
+                for (int t=0; t<10; ++t) {
+                    Eigen::Vector3f trial = vp.position - dir*step*(t+1);
+                    if (!is_not_safe_dist(trial)) {
+                        vp.position = trial;
+                        vp.updated = true;
+                        fixed = true;
+                        break;
+                    }
+                }
+                if (!fixed) {
+                    vp.invalid = true;
+                    vp.deleted = true;
+                    continue;
+                }
+            }            
+        }
+    }
+
+    // Similarity check (Position and orientation)
+
+    // Try to restore invalid viewpoints. Fail -> delete (update position indexing through handler)
     return 1;
 }
 
 bool ViewpointManager::build_all_vpts() {
     VD.global_vpts_handles.clear();
     VD.global_vpts.clear();
-    for (int vid=0; vid<(int)VD.global_skel.size(); ++vid) {
-        auto& v = VD.global_skel[vid];
+    for (int vid=0; vid<(int)VD.gskel.size(); ++vid) {
+        auto& v = VD.gskel[vid];
         for (int j=0; j<(int)v.vpts.size(); ++j) {
             VptHandle vphndl{vid, j};
             VD.global_vpts_handles.push_back(vphndl);
@@ -268,7 +367,7 @@ std::vector<Viewpoint> ViewpointManager::generate_viewpoint(int idx) {
     Eigen::Vector3f that, n1hat, n2hat;
     build_local_frame(idx, that, n1hat, n2hat);
     
-    auto& vertex = VD.global_skel[idx];
+    auto& vertex = VD.gskel[idx];
     const int type = vertex.type;
     const Eigen::Vector3f vertex_pos = vertex.position.getVector3fMap();
 
@@ -312,6 +411,7 @@ std::vector<Viewpoint> ViewpointManager::generate_viewpoint(int idx) {
     const float STEP = std::max(0.5f * S, 0.05f);
 
     // build viewpoints
+    int pos_id = 0;
     for (float phi : phis) {
         Eigen::Vector3f u(std::cos(phi), std::sin(phi), 0.0f);
         u.normalize();
@@ -335,15 +435,20 @@ std::vector<Viewpoint> ViewpointManager::generate_viewpoint(int idx) {
         float yaw = yaw_to_face(vp_pos, vertex_pos);
         Viewpoint vp;
         vp.position = vp_pos;
-        vp.orientation = yaw_to_quat(yaw);
+        vp.yaw = yaw;
+        vp.orientation = yaw_to_quat(yaw); // maybe drop quat and use only yaw...
         vp.target_vid = vertex.vid;
+        vp.target_vp_pos = pos_id;
+        vp.updated = true;
+
         out.push_back(vp);
+        pos_id++;
     }
     return out;
 }
 
 void ViewpointManager::build_local_frame(const int vid, Eigen::Vector3f& that, Eigen::Vector3f& n1hat, Eigen::Vector3f& n2hat) {
-    const auto& v = VD.global_skel[vid];
+    const auto& v = VD.gskel[vid];
 
     that  = Eigen::Vector3f::UnitX();
     n1hat = Eigen::Vector3f::UnitY();
@@ -354,7 +459,7 @@ void ViewpointManager::build_local_frame(const int vid, Eigen::Vector3f& that, E
     Eigen::MatrixXf M(3, std::max<size_t>(v.nb_ids.size(), 1));
     for (size_t i=0; i<v.nb_ids.size(); ++i) {
         const int nb_id = v.nb_ids[i];
-        const auto& nb_v = VD.global_skel[nb_id];
+        const auto& nb_v = VD.gskel[nb_id];
         Eigen::Vector3f e = nb_v.position.getVector3fMap() - v.position.getVector3fMap();
         M.col(int(i)) = e;
     }
@@ -473,7 +578,7 @@ std::vector<int> ViewpointManager::walk_branch(int start_idx, int nb_idx, const 
         if (is_endpoint_[curr] && curr != start_idx) break; // found endpoint
         int next_idx = -1;
 
-        for (int nb_i : VD.global_adj[curr]) {
+        for (int nb_i : VD.gadj[curr]) {
             if (nb_i == prev) continue;
             if (!allowed[nb_i]) continue;
             if (!edge_seen(curr, nb_i)) {
@@ -484,7 +589,7 @@ std::vector<int> ViewpointManager::walk_branch(int start_idx, int nb_idx, const 
 
         // fallback: any nb neq prev
         if (next_idx == -1) {
-            for (int nb_i : VD.global_adj[curr]) {
+            for (int nb_i : VD.gadj[curr]) {
                 if (nb_i != prev) {
                     next_idx = nb_i;
                     break;
