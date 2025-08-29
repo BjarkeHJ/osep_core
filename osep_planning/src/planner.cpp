@@ -56,52 +56,101 @@ bool PathPlanner::build_graph(std::vector<Vertex>& gskel) {
     }
 
     G.adj.resize(G.nodes.size());
-    if (G.nodes.empty()) return G;
-
+    if (G.nodes.empty()) {
+        PD.graph = G;
+        return 0;
+    }
     
+    //  std::unordered_set<uint64_t> edge_set; edge_set.reserve(G.nodes.size()*4);
 
+    // // ----- 2A) Intra-vertex links (each VP to its nearest sibling) -----
+    // if (connect_intra) {
+    //     for (const auto& kv : vids_to_gids) {
+    //         const auto& glist = kv.second;        // gids for this vid
+    //         const int m = (int)glist.size();
+    //         if (m <= 1) continue;
 
-    // const float vis_graph_radius = 20.0f;
+    //         // For each node, connect to nearest same-vid node (simple sparse linking)
+    //         for (int ii = 0; ii < m; ++ii) {
+    //             int gi = glist[ii];
+    //             const auto& pi = G.nodes[gi].p;
 
-    // vpt_cloud->points.clear();
-    // std::vector<std::vector<int>> vidx2cidx(gskel.size());
-    
-    // std::unordered_map<int,int> cidx2vidx;
-    // cidx2vidx.reserve(gskel.size());
+    //             float best_d2 = std::numeric_limits<float>::infinity();
+    //             int best_gj = -1;
 
-    // pcl::PointXYZ vp_p;
+    //             for (int jj = 0; jj < m; ++jj) {
+    //                 if (ii == jj) continue;
+    //                 int gj = glist[jj];
+    //                 float dd2 = d2(pi, G.nodes[gj].p);
+    //                 if (dd2 < best_d2) {
+    //                     best_d2 = dd2;
+    //                     best_gj = gj;
+    //                 }
+    //             }
 
-    // int vidx = 0;
-    // int cidx = 0;
-    // for (Vertex& v : gskel) {
-    //     for (Viewpoint& vp : v.vpts) {
-    //         vp_p = {vp.position.x(), vp.position.y(), vp.position.z()};
-    //         vpt_cloud->points.push_back(vp_p);
-    //         vidx2cidx[vidx][cidx] = cidx;
-    //         ++cidx;
-    //     }
-    //     ++vidx;
-    // }
+    //             if (best_gj >= 0) {
+    //                 const auto& pj = G.nodes[best_gj].p;
+    //                 if (!line_of_sight || line_of_sight(pi, pj)) {
+    //                     add_edge_ud(G, gi, best_gj, std::sqrt(best_d2), edge_set);
+    //                 }
+    //             }
+    //         }
 
-    // const int N = static_cast<int>(vpt_cloud->points.size());
-    // vpt_kdtree.setInputCloud(vpt_cloud);
-    // std::vector<int> ids;
-    // std::vector<float> d2s;
-
-    // for (int i=0; i<N; ++i) {
-    //     ids.clear();
-    //     d2s.clear();
-    //     pcl::PointXYZ qp = vpt_cloud->points[i];
-    //     int n_nbs = vpt_kdtree.radiusSearch(qp, vis_graph_radius, ids, d2s);
-
-    //     for (int jj=0; jj<n_nbs; ++jj) {
-    //         int j = ids[jj];
-    //         if (j <= i) continue; // undirected graph
-
-
-
+    //         // (Optional) If you prefer a strictly connected set with m-1 edges,
+    //         // you could build a tiny MST per vid instead of "each to nearest".
     //     }
     // }
+
+    // // ----- 2B) Inter-vertex links (across skeleton adjacency) -----
+    // if (connect_inter) {
+    //     for (const auto& u : gskel) {
+    //         // gids that belong to vertex u
+    //         auto itU = vids_to_gids.find(u.vid);
+    //         if (itU == vids_to_gids.end() || itU->second.empty()) continue;
+
+    //         for (int vvid : u.nb_ids) {
+    //             // guard: only handle each undirected skel edge once (u.vid < vvid)
+    //             if (u.vid >= vvid) continue;
+
+    //             auto itV = vids_to_gids.find(vvid);
+    //             if (itV == vids_to_gids.end() || itV->second.empty()) continue;
+
+    //             const auto& gids_u = itU->second;
+    //             const auto& gids_v = itV->second;
+
+    //             // For each u-viewpoint, connect to K nearest in v (small sets -> brute force OK)
+    //             for (int gi : gids_u) {
+    //                 struct Cand { int gj; float d2; };
+    //                 std::vector<Cand> cands; cands.reserve((size_t)std::min(inter_K, (int)gids_v.size()));
+
+    //                 // collect nearest K
+    //                 for (int gj : gids_v) {
+    //                     float dd2 = d2(G.nodes[gi].p, G.nodes[gj].p);
+    //                     // keep a small unsorted list up to K
+    //                     if ((int)cands.size() < inter_K) {
+    //                         cands.push_back({gj, dd2});
+    //                     } else {
+    //                         // replace worst if better
+    //                         int worst = 0; float worst_d2 = cands[0].d2;
+    //                         for (int t=1; t<(int)cands.size(); ++t) {
+    //                             if (cands[t].d2 > worst_d2) { worst = t; worst_d2 = cands[t].d2; }
+    //                         }
+    //                         if (dd2 < worst_d2) cands[worst] = {gj, dd2};
+    //                     }
+    //                 }
+
+    //                 // add edges (LOS-gated)
+    //                 for (const auto& c : cands) {
+    //                     if (!line_of_sight || line_of_sight(G.nodes[gi].p, G.nodes[c.gj].p)) {
+    //                         add_edge_ud(G, gi, c.gj, std::sqrt(c.d2), edge_set);
+    //                     }
+    //                 }
+    //             }
+    //         }
+    //     }
+    // }
+
+
 
     return 1;
 }
