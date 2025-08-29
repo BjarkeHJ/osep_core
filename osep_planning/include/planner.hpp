@@ -6,6 +6,7 @@
 #include <chrono>
 #include <unordered_set>
 #include <pcl/octree/octree.h>
+#include <pcl/kdtree/kdtree_flann.h>
 
 #define RUN_STEP(fn) \
     do { \
@@ -24,59 +25,47 @@ struct PlannerConfig {
 };
 
 struct PlannerData {
-    size_t gskel_size;
-    std::vector<Vertex> gskel;
-    std::unordered_map<int,int> gskel_vid2idx;
+    Graph graph;
 
     Viewpoint start;
     Viewpoint end;
-
-    pcl::PointCloud<pcl::PointXYZ>::ConstPtr gmap; // owned by node - should not be mutated
-
-    Graph G;
 };
 
 
 class PathPlanner {
 public:
     PathPlanner(const PlannerConfig& cfg);
-    bool planner_run();
-    void update_skeleton(const std::vector<Vertex>& verts);
 
+    void update_skeleton(const std::vector<Vertex>& verts);
     void set_map(pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud, std::shared_ptr<pcl::octree::OctreePointCloudSearch<pcl::PointXYZ>> oct = nullptr) {
-       PD.gmap = std::move(cloud);
+       gmap = std::move(cloud);
        octree_ = std::move(oct); 
     }
+    void set_vid2idx(std::unordered_map<int,int>& vid2idx) { gskel_vid2idx = vid2idx; } // Copy current unique vid mapping
 
-    // pcl::PointCloud<pcl::PointXYZ>& input_map() { return *PD.gmap; }
-    std::vector<Vertex>& output_skeleton() { return PD.gskel; }
-    const Graph& output_graph() { return PD.G; }
+    bool plan_path(std::vector<Vertex>& gskel);
 
 private:
+    std::unordered_map<int,int> gskel_vid2idx;
+
     /* Functions */
-    
-
-    bool generate_path();
-
-    /* Graph construction steps */
-    void rebuild_viewpoint_index();
-    void build_topological_edges();
-    void build_geometric_edges();
+    bool build_graph(std::vector<Vertex>& gskel);
+    bool generate_path(std::vector<Vertex>& gskel);
 
     /* Helper */
-    void merge_viewpoints(Vertex& vcur, const Vertex& vin);
-
-    static inline bool approx_eq(float a, float b, float eps=1e-6f){ return std::fabs(a-b) <= eps; }
-    static inline bool approx_eq3(const Eigen::Vector3f& a,const Eigen::Vector3f& b,float eps2=1e-8f){ return (a - b).squaredNorm() <= eps2; }
-
     bool line_of_sight(const Eigen::Vector3f& a, const Eigen::Vector3f& b);
 
     /* Params & Data */
+    pcl::PointCloud<pcl::PointXYZ>::ConstPtr gmap;
+    std::shared_ptr<pcl::octree::OctreePointCloudSearch<pcl::PointXYZ>> octree_;
+
+    pcl::KdTreeFLANN<pcl::PointXYZ> vpt_kdtree; // remove again?
+    pcl::PointCloud<pcl::PointXYZ>::Ptr vpt_cloud; // remove again?
+
     PlannerConfig cfg_;
     bool running;
-    PlannerData PD;
 
-    std::shared_ptr<pcl::octree::OctreePointCloudSearch<pcl::PointXYZ>> octree_;
+    PlannerData PD;
 
 };
 

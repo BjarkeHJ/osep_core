@@ -4,10 +4,12 @@ ROS2 Node for Path Planning
 
 */
 
+#include "types.hpp"
 #include "viewpoint_manager.hpp"
 #include "planner.hpp"
 
 #include <mutex>
+#include <unordered_set>
 #include <rclcpp/rclcpp.hpp>
 
 #include <pcl_conversions/pcl_conversions.h>
@@ -38,7 +40,7 @@ private:
         latest_map_ = std::move(msg);
     }
 
-    // void update_skeleton();
+    void update_skeleton(const std::vector<Vertex>& skel_in);
     void process_tick();
     
     /* ROS2 */
@@ -62,7 +64,8 @@ private:
     MsgSkeleton::ConstSharedPtr latest_skel_;
     sensor_msgs::msg::PointCloud2::ConstSharedPtr latest_map_;
 
-    // std::vector<Vertex> skeleton_;
+    std::vector<Vertex> skeleton_;
+    std::unordered_map<int, int> vid2idx_;
     pcl::PointCloud<pcl::PointXYZ>::Ptr map_cloud_;
     std::shared_ptr<pcl::octree::OctreePointCloudSearch<pcl::PointXYZ>> map_octree_;
 
@@ -128,17 +131,18 @@ PlannerNode::PlannerNode() : Node("PlannerNode") {
 }
 
 void PlannerNode::publish_viewpoints() {
-    if (!planner_) return;
-    const auto& current_vers = planner_->output_skeleton();
-    const int N = static_cast<int>(current_vers.size());
+    if (skeleton_.empty()) return;
+
+    const int N = static_cast<int>(skeleton_.size());
     if (N == 0) return;
 
     geometry_msgs::msg::PoseArray vpts_msg;
     vpts_msg.header = current_header;
     
-    for (const auto& v : current_vers) {
+    for (const auto& v : skeleton_) {
+        if (v.vpts.empty()) continue;
         for (const auto& vp : v.vpts) {
-            // if (vp.invalid) continue;
+            if (vp.invalid) continue;
             geometry_msgs::msg::Pose p;
             p.position.x = vp.position.x();
             p.position.y = vp.position.y();
@@ -154,71 +158,57 @@ void PlannerNode::publish_viewpoints() {
 }
 
 void PlannerNode::publish_graph() {
-    if (!planner_) return;
-    const auto& G = planner_->output_graph();
-    const int N = static_cast<int>(G.nodes.size());
-    if (N == 0) return;
+    return;
+}
 
-    visualization_msgs::msg::MarkerArray arr;
-    {
-        visualization_msgs::msg::Marker clr;
-        clr.header = current_header; // frame + stamp; falls back to empty if not set
-        clr.ns = "graph_edges";
-        clr.id = 0;
-        clr.action = visualization_msgs::msg::Marker::DELETEALL;
-        arr.markers.push_back(clr);
-    }
-
-    auto make_line_list = [&](const std::string& ns, int id,
-                              float r, float g, float b, float a,
-                              double thickness_m)
-        -> visualization_msgs::msg::Marker {
-        visualization_msgs::msg::Marker m;
-        m.header = current_header;               // use your skeleton/map frame
-        m.ns = ns;
-        m.id = id;
-        m.type = visualization_msgs::msg::Marker::LINE_LIST;
-        m.action = visualization_msgs::msg::Marker::ADD;
-        m.scale.x = thickness_m;                 // line width (meters)
-        m.color.r = r; m.color.g = g; m.color.b = b; m.color.a = a;
-        m.pose.orientation.w = 1.0;              // identity
-        m.lifetime = rclcpp::Duration::from_seconds(0.0); // persistent until next update
-        return m;
-    };
-
-    // Two markers: topo (e.g., red), geom (e.g., cyan)
-    auto topo = make_line_list("graph_topological", 1, 1.0f, 0.1f, 0.1f, 1.0f, 0.05);
-    auto geom = make_line_list("graph_geometric",   2, 0.1f, 0.9f, 1.0f, 1.0f, 0.03);
-
-    // Avoid drawing each undirected edge twice: only add (i,j) with i < j.
-    for (int i = 0; i < N; ++i) {
-        const auto& ni = G.nodes[i];
-        for (size_t k = 0; k < G.adj[i].size(); ++k) {
-            int j = G.adj[i][k];
-            if (j <= i) continue; // draw once
-            const auto& flags = G.adjf[i][k];
-
-            geometry_msgs::msg::Point pa, pb;
-            pa.x = ni.pos.x(); pa.y = ni.pos.y(); pa.z = ni.pos.z();
-            const auto& nj = G.nodes[j];
-            pb.x = nj.pos.x(); pb.y = nj.pos.y(); pb.z = nj.pos.z();
-
-            if (flags.is_topological) {
-                topo.points.push_back(pa);
-                topo.points.push_back(pb);
-            }
-            if (flags.is_geometric) {
-                geom.points.push_back(pa);
-                geom.points.push_back(pb);
-            }
+void PlannerNode::update_skeleton(const std::vector<Vertex>& skel_in) { 
+    // Update or insert incoming vertices
+    for (const auto& vin : skel_in) {
+        auto it = vid2idx_.find(vin.vid); // pointer to the index of vid2idx_ if vin.vid exists
+        if (it == vid2idx_.end()) {
+            // vin.vid not found -> new vertex
+            Vertex vnew = vin; // copy new vertex
+            vid2idx_[vnew.vid] = static_cast<int>(skeleton_.size());
+            skeleton_.push_back(std::move(vnew));
+            continue;
         }
+
+        // Vertex already exists -> update in place to preserve information
+        const int idx = it->second;
+        Vertex& vcur = skeleton_[idx]; // by ref (mutate)
+        vcur.pos_update = vin.pos_update;
+        vcur.type_update = vin.type_update;
+        vcur.position = vin.position;
+        vcur.type = vin.type;
+        vcur.nb_ids = vin.nb_ids;
     }
 
-    // Push only if non-empty, to avoid spamming RViz with empty markers
-    if (!topo.points.empty()) arr.markers.push_back(std::move(topo));
-    if (!geom.points.empty()) arr.markers.push_back(std::move(geom));
+    // if vid is in planner skeleton but not in incoming skeleton -> remove here (has been deleted)
+    std::unordered_set<int> incoming;
+    incoming.reserve(skel_in.size() * 2);
+    for (const auto& v : skel_in) {
+        incoming.insert(v.vid);
+    }
 
-    graph_pub_->publish(arr);
+    // look from end to start to preserve valid indexing
+    for (int i = static_cast<int>(skeleton_.size()) - 1; i >= 0; --i) {
+        if (incoming.count(skeleton_[i].vid)) continue; // still valid
+        
+        int last = static_cast<int>(skeleton_.size()) - 1;
+        int erased_vid = skeleton_[i].vid;
+        // swap and pop back
+        if (i != last) {
+            std::swap(skeleton_[i], skeleton_[last]);
+        }
+        skeleton_.pop_back();
+    }
+
+    // rebuild vid2idx_
+    vid2idx_.clear();
+    vid2idx_.reserve(skeleton_.size());
+    for (int i=0; i<static_cast<int>(skeleton_.size()); ++i) {
+        vid2idx_[skeleton_[i].vid] = i;
+    }
 }
 
 void PlannerNode::process_tick() {
@@ -245,11 +235,19 @@ void PlannerNode::process_tick() {
         }
     }
 
+    // Update octree 
+    Eigen::Vector4f minpt, maxpt;
+    pcl::getMinMax3D(*map_cloud_, minpt, maxpt);
+    const float pad = 10.0f * map_voxel_size_;
     map_octree_->deleteTree();
     map_octree_->setInputCloud(map_cloud_);
+    map_octree_->defineBoundingBox(
+        minpt.x() - pad, minpt.y() - pad, minpt.z() - pad,
+        maxpt.x() + pad, maxpt.y() + pad, maxpt.z() + pad
+    );
     map_octree_->addPointsFromInputCloud();
 
-    // Set map in vpman_ and planner_
+    // Pass map cloud and map octree
     vpman_->set_map(map_cloud_, map_octree_);
     planner_->set_map(map_cloud_, map_octree_);
 
@@ -272,14 +270,16 @@ void PlannerNode::process_tick() {
         skel_inc.push_back(v);
     }
 
-    vpman_->update_skeleton(skel_inc); // updates the skeleton in place - preserves or changes the current state
+    // Update skeleton_ in place -> This object will then be parsed by reference and mutated in vpman_ and planner_ respectively...
+    // Updates vid2idx_ too
+    update_skeleton(skel_inc);
 
-    if (vpman_->viewpoint_run()) {
-        const auto& vers_w_vpts = vpman_->output_skeleton();
 
-        planner_->update_skeleton(vers_w_vpts);
-        if (planner_->planner_run()) {  
-            // do something
+    vpman_->set_vid2idx(vid2idx_); // Store current vid mapping in vpman_
+    if (vpman_->update_viewpoints(skeleton_)) {
+        planner_->set_vid2idx(vid2idx_); // Store current vid mapping in vpman_
+        if (planner_->plan_path(skeleton_)) {
+            // publish path etc etc...
         }
     }
 }

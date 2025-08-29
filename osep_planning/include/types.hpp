@@ -34,66 +34,54 @@ struct Vertex {
     std::vector<Viewpoint> vpts; // Vertex viewpoints
 };
 
-struct ViewpointHandle {
-    int vid = -1; // skeleton vertex id
-    int k = -1; // index inside the vertex' vpts vector
-    bool operator==(const ViewpointHandle& o) const noexcept { return vid==o.vid && k==o.k; }
-};
-
-struct ViewpointNode {
-    int gid = -1; // global viewpoint id in flat array
-    ViewpointHandle h; // (vid, k)
-    Eigen::Vector3f pos;
+struct GraphNode {
+    int gid; // global graph node id
+    int vid; // owning vertex id
+    int k; // index in that vertex's vpts
+    Eigen::Vector3f p; // position
     float yaw;
-    bool valid = true;
+    float score;
 };
 
-struct EdgeFlag {
-    bool is_topological; // Connected viewpoints vertices are adjacent OR viewpoints correspond to the same viewpoint?
-    bool is_geometric; // Connected viewpoints are close? (LOS check?)
+struct GraphEdge {
+    int to;
+    float w; // weight
 };
 
 struct Graph {
-    std::vector<ViewpointNode> nodes;
-    std::vector<std::vector<int>> adj;
-    std::vector<std::vector<EdgeFlag>> adjf;
-
-    std::unordered_map<long long, int> handle2gid; // key(vid, k) -> gid 
+    std::vector<GraphNode> nodes; // gid -> node 
+    std::vector<std::vector<GraphEdge>> adj; // adjacency matrix
 };
 
-// Hash key builder: Takes two ints (32 bit) and stores them as a single key long int (64 bit)
-// Unsigned important (signed k would corrupt the msb)
-static inline long long hk(int vid, int k) {
-    return ( (static_cast<long long>(vid) << 32) ^ static_cast<unsigned long long>(k) );
+
+
+/* Graph Helper Functions */
+
+// HaskKey: pack (vid, k) -> 64bit key (stable handle)
+static inline uint64_t hk(int vid, int k) {
+    return ( (uint64_t(uint32_t(vid)) << 32) ^ uint64_t(uint32_t(k)) );
 }
 
-// Undirected edge key
-static inline long long ek(int a, int b) {
-    if (a > b) std::swap(a, b);
-    return ( (static_cast<long long>(a) << 32) ^ static_cast<unsigned long long>(b) );
+// EdgeKey: pack undirected (a,b) with a<b to dedup edges
+static inline uint64_t ek(int a, int b) {
+    if (a > b) std::swap(a,b);
+    return ( (uint64_t(uint32_t(a)) << 32) ^ uint64_t(uint32_t(b)) );
 }
 
-// Push edge (undirected) only once; attach flags
-struct EdgeBuilder {
-    Graph& G;
-    std::unordered_set<long long> seen; // clear per rebuild
+// squared distance
+static inline float d2(const Eigen::Vector3f& a, const Eigen::Vector3f& b) {
+    return (a - b).squaredNorm();
+}
 
-    EdgeBuilder(Graph& g) : G(g) { seen.reserve(1 << 16); }
-
-    void add(int i, int j, bool is_topo, bool is_geom) {
-        if (i == j) return;
-        long long key = ek(i, j);
-        if (!seen.insert(key).second) {
-            // already added; optionally OR-in flags if you keep a separate edge store
-            return;
-        }
-        G.adj[i].push_back(j);
-        G.adjf[i].push_back({is_topo, is_geom});
-        G.adj[j].push_back(i);
-        G.adjf[j].push_back({is_topo, is_geom});
+// add undirected edge if not present
+static inline void add_edge(Graph& G, int u, int v, float w, std::unordered_set<uint64_t>& edge_set) {
+    if (u == v) return;
+    uint64_t k = ek(u, v);
+    if (edge_set.insert(k).second) {
+        G.adj[u].push_back({v, w});
+        G.adj[v].push_back({u, w});
     }
-};
-
+}
 
 
 #endif

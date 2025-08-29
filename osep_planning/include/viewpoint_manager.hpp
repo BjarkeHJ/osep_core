@@ -20,86 +20,31 @@ struct ViewpointConfig {
     float vpt_safe_dist;
 };
 
-struct PairHash {
-    std::size_t operator()(const std::pair<int,int>& p) const noexcept {
-        return std::hash<int>()(p.first) ^ (std::hash<int>()(p.second) << 1);
-    }
-};
-
-
-
-struct VptHandle {
-    int vid; // Vertex id (in gskel)
-    int idx; // Index inside that vertex's vpts vector
-};
-
-struct ViewpointData {
-    size_t gskel_size;
-    std::vector<Vertex> gskel;
-    std::unordered_map<int,int> gskel_vid2idx;
-    
-    std::vector<std::vector<int>> gadj;
-    std::vector<int> updated_vertices;
-    std::vector<std::vector<int>> branches;
-
-    pcl::PointCloud<pcl::PointXYZ>::ConstPtr gmap; // owned by node - should not be mutated
-    
-    std::vector<Viewpoint> global_vpts;
-    std::vector<VptHandle> global_vpts_handles; // for referencing into each vertex viewpoints
-};
-
-
 class ViewpointManager {
 public:
     ViewpointManager(const ViewpointConfig &cfg);
-    bool viewpoint_run();
-
+    
     void set_map(pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud, std::shared_ptr<pcl::octree::OctreePointCloudSearch<pcl::PointXYZ>> oct = nullptr) {
-       VD.gmap = std::move(cloud);
-       octree_ = std::move(oct); 
+        gmap = std::move(cloud);
+        octree_ = std::move(oct); 
     }
 
-    // pcl::PointCloud<pcl::PointXYZ>& input_map() { return *VD.gmap; }
-    void update_skeleton(const std::vector<Vertex>& verts);
-
-    std::vector<Vertex>& output_skeleton() { return VD.gskel; }
+    bool update_viewpoints(std::vector<Vertex>& gskel);
+    void set_vid2idx(std::unordered_map<int,int>& vid2idx) { gskel_vid2idx = vid2idx; } // Copy current unique vid mapping
 
 private:
     /* Functions */
-    bool fetch_updates();
-    bool branch_extract();
-    bool build_all_vpts();
+    bool sample_viewpoints(std::vector<Vertex>& gskel);
+    bool filter_viewpoints(std::vector<Vertex>& gskel);
+    
+    bool viewpoint_scoring(); // ??
 
-    bool viewpoint_sampling();
-    bool viewpoint_filtering();
-    bool viewpoint_scoring();
-
-    bool viewpoint_visibility_graph();
-
-    /* Helper */
-    std::vector<int> walk_branch(int start_idx, int nb_idx, const std::vector<char>& allowed, std::unordered_set<std::pair<int,int>, PairHash>& visited_edges);
-    std::vector<Viewpoint> generate_viewpoint(int id);
-    void build_local_frame(const int vid, Eigen::Vector3f& that, Eigen::Vector3f& n1hat, Eigen::Vector3f& n2hat);
+    /* Helpers */
+    std::vector<Viewpoint> generate_viewpoints(std::vector<Vertex>& gskel, Vertex& v);
+    void build_local_frame(std::vector<Vertex>& gskel, Vertex& v, Eigen::Vector3f& that, Eigen::Vector3f& n1hat, Eigen::Vector3f& n2hat);
     float distance_to_free_space(const Eigen::Vector3f& p_in, const Eigen::Vector3f dir_in);
 
-    /* Viewpoint Handle Helpers */
-    inline bool is_valid_handle(const VptHandle& h) {
-        return h.vid >= 0 && h.vid < static_cast<int>(VD.gskel.size()) && h.idx >= 0 && h.idx < static_cast<int>(VD.gskel[h.vid].vpts.size());
-    }
-    inline Viewpoint& get_vp_from_handle(const VptHandle& h) {
-        return VD.gskel[h.vid].vpts[h.idx];
-    }
-    inline void erase_handles_for_vertex(int vid) {
-        VD.global_vpts_handles.erase(std::remove_if(VD.global_vpts_handles.begin(), VD.global_vpts_handles.end(), [vid](const VptHandle& h){ return h.vid == vid; }), VD.global_vpts_handles.end());
-    }
-    inline void append_handles_for_vertex(int vid) {
-        const auto& v = VD.gskel[vid];
-        for (int j=0; j<(int)v.vpts.size(); ++j) {
-            VD.global_vpts_handles.push_back({vid, j});
-        }
-    }
-
-    /* Viewpoint Sampling Helpers */
+    /* Inlines */
     inline float deg2rad(float d) { return d * float(M_PI) / 180.0f; }
     inline float wrapPi(float a) {
         float twoPi = 2.0f * float(M_PI);
@@ -118,22 +63,14 @@ private:
         return octree_->radiusSearch(qp, cfg_.vpt_safe_dist, ids, d2s) > 0;
     }
 
-    /* Params */
+    /* DATA */
+    bool running; 
     ViewpointConfig cfg_;
-    bool running;
-
-    /* Data */
-    ViewpointData VD;
-
-    // std::shared_ptr<pcl::octree::OctreePointCloudOccupancy<pcl::PointXYZ>> octree_;
     std::shared_ptr<pcl::octree::OctreePointCloudSearch<pcl::PointXYZ>> octree_;
-
-    std::unordered_map<int,int> vid2idx_;
-    std::vector<int> idx2vid_;
-    std::vector<int> degree_;
-    std::vector<int> is_endpoint_;
-
-
+    pcl::PointCloud<pcl::PointXYZ>::ConstPtr gmap;
+    std::unordered_map<int,int> gskel_vid2idx;
+    
+    // std::vector<int> walk_branch(int start_idx, int nb_idx, const std::vector<char>& allowed, std::unordered_set<std::pair<int,int>, PairHash>& visited_edges);
 };
 
 #endif
