@@ -10,11 +10,13 @@ ROS2 Node for Path Planning
 #include <mutex>
 #include <rclcpp/rclcpp.hpp>
 
+#include <pcl_conversions/pcl_conversions.h>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/pose_array.hpp>
 #include <nav_msgs/msg/path.hpp>
-#include <pcl_conversions/pcl_conversions.h>
+#include <visualization_msgs/msg/marker.hpp>
+#include <visualization_msgs/msg/marker_array.hpp>
 
 #include "osep_skeleton_decomp/msg/vertex.hpp"
 #include "osep_skeleton_decomp/msg/global_skeleton.hpp"
@@ -35,6 +37,8 @@ private:
         std::lock_guard<std::mutex> lk(mtx_);
         latest_map_ = std::move(msg);
     }
+
+    // void update_skeleton();
     void process_tick();
     
     /* ROS2 */
@@ -49,12 +53,18 @@ private:
     std::string skeleton_topic_;
     std::string map_topic_;
     std::string path_topic_;
-    std::string viewpoint_topic_;
+    std::string viewpoint_topic_; // vis
+    std::string graph_topic_; // vis
     int tick_ms_;
+    float map_voxel_size_;
 
     /* Data */
     MsgSkeleton::ConstSharedPtr latest_skel_;
     sensor_msgs::msg::PointCloud2::ConstSharedPtr latest_map_;
+
+    // std::vector<Vertex> skeleton_;
+    pcl::PointCloud<pcl::PointXYZ>::Ptr map_cloud_;
+    std::shared_ptr<pcl::octree::OctreePointCloudSearch<pcl::PointXYZ>> map_octree_;
 
     /* Utils */
     std::mutex mtx_;
@@ -63,32 +73,38 @@ private:
 
     /* Visualization */
     void publish_viewpoints();
-    rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr vpt_pub_; // vis
+    void publish_graph();
+    rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr vpt_pub_; // viewpoint vis
+    rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr graph_pub_;
     rclcpp::TimerBase::SharedPtr vpt_timer_;
-    std::vector<Vertex> current_vers;
     std_msgs::msg::Header current_header;
 };
 
 PlannerNode::PlannerNode() : Node("PlannerNode") {
     /* LAUNCH FILE PARAMETER DECLARATIONS */
     tick_ms_ = declare_parameter<int>("tick_ms", 200);
+    map_voxel_size_ = declare_parameter<float>("map_voxel_size", 1.0f);
 
     // TOPICS
     skeleton_topic_ = declare_parameter<std::string>("skeleton_topic", "/osep/gskel/global_skeleton_vertices");
     map_topic_ = declare_parameter<std::string>("map_topic", "/osep/lidar_map/global_map");
     path_topic_ = declare_parameter<std::string>("path_topic", "/osep/planner/path");
     viewpoint_topic_ = declare_parameter<std::string>("viewpoints_topic", "/osep/planner/viewpoints"); // vis
+    graph_topic_= declare_parameter<std::string>("graph_topic", "/osep/planner/graph"); // vis
 
     // VIEWPOINTMANAGER
-    vpman_cfg.map_voxel_size = declare_parameter<float>("map_voxel_size", 1.0f);
-    vpman_cfg.vpt_disp_dist = declare_parameter<float>("vpt_displacement_dist", 12.0f);
+    vpman_cfg.vpt_safe_dist = declare_parameter<float>("vpt_safe_dist", 12.0f);
+    vpman_cfg.map_voxel_size = map_voxel_size_;
 
     // PATHPLANNER
+    planner_cfg.map_voxel_size = map_voxel_size_;
     
-
     /* OBJECT INITIALIZATION */
     vpman_ = std::make_unique<ViewpointManager>(vpman_cfg);
     planner_ = std::make_unique<PathPlanner>(planner_cfg);
+
+    map_cloud_.reset(new pcl::PointCloud<pcl::PointXYZ>);
+    map_octree_ = std::make_shared<pcl::octree::OctreePointCloudSearch<pcl::PointXYZ>>(map_voxel_size_); // initialize octree
 
     /* ROS2 */
     auto sub_qos = rclcpp::QoS(rclcpp::KeepLast(5)).best_effort();
@@ -103,20 +119,26 @@ PlannerNode::PlannerNode() : Node("PlannerNode") {
     auto pub_qos = rclcpp::QoS(rclcpp::KeepLast(5)).reliable();
     path_pub_ = this->create_publisher<nav_msgs::msg::Path>(path_topic_, pub_qos);
     vpt_pub_  = this->create_publisher<geometry_msgs::msg::PoseArray>(viewpoint_topic_, pub_qos);
+    graph_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>(graph_topic_, pub_qos);
 
     tick_timer_ = this->create_wall_timer(std::chrono::milliseconds(tick_ms_), std::bind(&PlannerNode::process_tick, this));
 
-    vpt_timer_ = this->create_wall_timer(std::chrono::milliseconds(200), std::bind(&PlannerNode::publish_viewpoints, this));
+    vpt_timer_ = this->create_wall_timer(std::chrono::milliseconds(200), 
+        [this]{ publish_viewpoints(); publish_graph(); });
 }
 
 void PlannerNode::publish_viewpoints() {
-    if (current_vers.empty()) return;
+    if (!planner_) return;
+    const auto& current_vers = planner_->output_skeleton();
+    const int N = static_cast<int>(current_vers.size());
+    if (N == 0) return;
+
     geometry_msgs::msg::PoseArray vpts_msg;
     vpts_msg.header = current_header;
     
     for (const auto& v : current_vers) {
         for (const auto& vp : v.vpts) {
-            if (vp.invalid) continue;
+            // if (vp.invalid) continue;
             geometry_msgs::msg::Pose p;
             p.position.x = vp.position.x();
             p.position.y = vp.position.y();
@@ -131,6 +153,74 @@ void PlannerNode::publish_viewpoints() {
     vpt_pub_->publish(vpts_msg);
 }
 
+void PlannerNode::publish_graph() {
+    if (!planner_) return;
+    const auto& G = planner_->output_graph();
+    const int N = static_cast<int>(G.nodes.size());
+    if (N == 0) return;
+
+    visualization_msgs::msg::MarkerArray arr;
+    {
+        visualization_msgs::msg::Marker clr;
+        clr.header = current_header; // frame + stamp; falls back to empty if not set
+        clr.ns = "graph_edges";
+        clr.id = 0;
+        clr.action = visualization_msgs::msg::Marker::DELETEALL;
+        arr.markers.push_back(clr);
+    }
+
+    auto make_line_list = [&](const std::string& ns, int id,
+                              float r, float g, float b, float a,
+                              double thickness_m)
+        -> visualization_msgs::msg::Marker {
+        visualization_msgs::msg::Marker m;
+        m.header = current_header;               // use your skeleton/map frame
+        m.ns = ns;
+        m.id = id;
+        m.type = visualization_msgs::msg::Marker::LINE_LIST;
+        m.action = visualization_msgs::msg::Marker::ADD;
+        m.scale.x = thickness_m;                 // line width (meters)
+        m.color.r = r; m.color.g = g; m.color.b = b; m.color.a = a;
+        m.pose.orientation.w = 1.0;              // identity
+        m.lifetime = rclcpp::Duration::from_seconds(0.0); // persistent until next update
+        return m;
+    };
+
+    // Two markers: topo (e.g., red), geom (e.g., cyan)
+    auto topo = make_line_list("graph_topological", 1, 1.0f, 0.1f, 0.1f, 1.0f, 0.05);
+    auto geom = make_line_list("graph_geometric",   2, 0.1f, 0.9f, 1.0f, 1.0f, 0.03);
+
+    // Avoid drawing each undirected edge twice: only add (i,j) with i < j.
+    for (int i = 0; i < N; ++i) {
+        const auto& ni = G.nodes[i];
+        for (size_t k = 0; k < G.adj[i].size(); ++k) {
+            int j = G.adj[i][k];
+            if (j <= i) continue; // draw once
+            const auto& flags = G.adjf[i][k];
+
+            geometry_msgs::msg::Point pa, pb;
+            pa.x = ni.pos.x(); pa.y = ni.pos.y(); pa.z = ni.pos.z();
+            const auto& nj = G.nodes[j];
+            pb.x = nj.pos.x(); pb.y = nj.pos.y(); pb.z = nj.pos.z();
+
+            if (flags.is_topological) {
+                topo.points.push_back(pa);
+                topo.points.push_back(pb);
+            }
+            if (flags.is_geometric) {
+                geom.points.push_back(pa);
+                geom.points.push_back(pb);
+            }
+        }
+    }
+
+    // Push only if non-empty, to avoid spamming RViz with empty markers
+    if (!topo.points.empty()) arr.markers.push_back(std::move(topo));
+    if (!geom.points.empty()) arr.markers.push_back(std::move(geom));
+
+    graph_pub_->publish(arr);
+}
+
 void PlannerNode::process_tick() {
     MsgSkeleton::ConstSharedPtr skel_msg;
     sensor_msgs::msg::PointCloud2::ConstSharedPtr map_msg;
@@ -143,10 +233,25 @@ void PlannerNode::process_tick() {
     }   
 
     if (!skel_msg || !map_msg) return;
-    
-    // Set current map
-    auto& map = vpman_->input_map(); // should be update map and change in place???
-    pcl::fromROSMsg(*map_msg, map);
+    current_header = skel_msg->header;
+
+    // Set current map (node-owned) - Temp swap to avoid member realloc
+    {
+        pcl::PointCloud<pcl::PointXYZ> tmp;
+        pcl::fromROSMsg(*map_msg, tmp);
+        {
+            std::scoped_lock lk(mtx_);
+            map_cloud_->swap(tmp);
+        }
+    }
+
+    map_octree_->deleteTree();
+    map_octree_->setInputCloud(map_cloud_);
+    map_octree_->addPointsFromInputCloud();
+
+    // Set map in vpman_ and planner_
+    vpman_->set_map(map_cloud_, map_octree_);
+    planner_->set_map(map_cloud_, map_octree_);
 
     // Fill from skeleton message...
     std::vector<Vertex> skel_inc;
@@ -172,19 +277,9 @@ void PlannerNode::process_tick() {
     if (vpman_->viewpoint_run()) {
         const auto& vers_w_vpts = vpman_->output_skeleton();
 
-        // Overwrite for vis publishing
-        // current_vers = vers_w_vpts;
-        // current_header = skel_msg->header;
-        // ------------------------------
-
-        // std::cout << vers_w_vpts.size() << std::endl;
-
         planner_->update_skeleton(vers_w_vpts);
-        if (planner_->planner_run()) {
-            const auto& test = planner_->output_skeleton();
-            // std::cout << test.size() << std::endl;
-            current_vers = test;
-            current_header = skel_msg->header;
+        if (planner_->planner_run()) {  
+            // do something
         }
     }
 }

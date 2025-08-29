@@ -17,7 +17,7 @@
 
 struct ViewpointConfig {
     float map_voxel_size;
-    float vpt_disp_dist;
+    float vpt_safe_dist;
 };
 
 struct PairHash {
@@ -42,7 +42,7 @@ struct ViewpointData {
     std::vector<int> updated_vertices;
     std::vector<std::vector<int>> branches;
 
-    pcl::PointCloud<pcl::PointXYZ>::Ptr gmap;
+    pcl::PointCloud<pcl::PointXYZ>::ConstPtr gmap; // owned by node - should not be mutated
     
     std::vector<Viewpoint> global_vpts;
     std::vector<VptHandle> global_vpts_handles; // for referencing into each vertex viewpoints
@@ -54,7 +54,12 @@ public:
     ViewpointManager(const ViewpointConfig &cfg);
     bool viewpoint_run();
 
-    pcl::PointCloud<pcl::PointXYZ>& input_map() { return *VD.gmap; }
+    void set_map(pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud, std::shared_ptr<pcl::octree::OctreePointCloudSearch<pcl::PointXYZ>> oct = nullptr) {
+       VD.gmap = std::move(cloud);
+       octree_ = std::move(oct); 
+    }
+
+    // pcl::PointCloud<pcl::PointXYZ>& input_map() { return *VD.gmap; }
     void update_skeleton(const std::vector<Vertex>& verts);
 
     std::vector<Vertex>& output_skeleton() { return VD.gskel; }
@@ -110,7 +115,7 @@ private:
     inline Eigen::Quaternionf yaw_to_quat(float yaw) { return Eigen::Quaternionf(Eigen::AngleAxisf(yaw, Eigen::Vector3f::UnitZ())); }
     inline bool is_not_safe_dist(const Eigen::Vector3f& p) {
         std::vector<int> ids; std::vector<float> d2s; pcl::PointXYZ qp(p.x(), p.y(), p.z());
-        return octree_->radiusSearch(qp, cfg_.vpt_disp_dist, ids, d2s) > 0;
+        return octree_->radiusSearch(qp, cfg_.vpt_safe_dist, ids, d2s) > 0;
     }
 
     /* Params */
@@ -127,8 +132,6 @@ private:
     std::vector<int> idx2vid_;
     std::vector<int> degree_;
     std::vector<int> is_endpoint_;
-
-    /* Utils */
 
 
 };

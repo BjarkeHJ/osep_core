@@ -7,6 +7,9 @@ Main paht planning algorithm
 #include "planner.hpp"
 
 PathPlanner::PathPlanner(const PlannerConfig& cfg) : cfg_(cfg) {
+    PD.gmap.reset(new pcl::PointCloud<pcl::PointXYZ>);
+    // PD.gmap->points.reserve(50000);
+    // octree_ = std::make_shared<pcl::octree::OctreePointCloudSearch<pcl::PointXYZ>>(cfg_.map_voxel_size);
     running = 1;
 }
 
@@ -76,13 +79,177 @@ bool PathPlanner::planner_run() {
 }
 
 bool PathPlanner::generate_path() {
-    
+
+    // Flatten viewpoints (skips invalid / visited)
+    rebuild_viewpoint_index();
+
+    // Build edges
+    build_topological_edges();
+    build_geometric_edges();
 
     return 1;
 }
 
 
 /* HELPER */
+
+void PathPlanner::rebuild_viewpoint_index() {
+    PD.G.nodes.clear();
+    PD.G.handle2gid.clear();
+
+    int gid = 0;
+    // PD.G.nodes.reserve()
+
+    for (const auto& v : PD.gskel) {
+        if (v.vid < 0) continue;
+        for (int k=0; k<static_cast<int>(v.vpts.size()); ++k) {
+            const auto& vp = v.vpts[k];
+            // if (vp.invalid) continue;
+            if (vp.visited) continue; // Maybe not exclude visited here?
+            ViewpointNode n;
+            n.gid = gid;
+            n.h = {v.vid, k};
+            n.pos = vp.position;
+            n.yaw = vp.yaw;
+            n.valid = true;
+            PD.G.nodes.push_back(std::move(n));
+            PD.G.handle2gid[hk(v.vid, k)] = gid;
+            ++gid;
+        }
+    }
+
+    // resize adjacencies to size of nodes
+    const int N = static_cast<int>(PD.G.nodes.size());
+    PD.G.adj.assign(N, {});
+    PD.G.adjf.assign(N, {});
+}
+
+void PathPlanner::build_topological_edges() {
+    const int N = static_cast<int>(PD.G.nodes.size());
+    if (N == 0) return;
+
+    // vid -> gids lookup
+    std::unordered_map<int, std::vector<int>> vids_to_gids;
+    vids_to_gids.reserve(PD.gskel.size()*2);
+    for (const auto& n : PD.G.nodes) vids_to_gids[n.h.vid].push_back(n.gid);
+
+    EdgeBuilder eb(PD.G);
+    const float r2 = (cfg_.topo_radius > 0.0f) ? cfg_.topo_radius * cfg_.topo_radius : std::numeric_limits<float>::infinity();
+
+    auto connect_side = [&](const std::vector<int>& A, const std::vector<int>& B, int kmax){
+        for (int ga : A) {
+            const auto& pa = PD.G.nodes[ga].pos;
+            std::vector<std::pair<float,int>> cand; cand.reserve(B.size());
+            for (int gb : B) {
+                const auto& pb = PD.G.nodes[gb].pos;
+                float d2 = (pa - pb).squaredNorm();
+                if (d2 > r2) continue;
+                if (!line_of_sight(pa, pb)) continue;
+                cand.emplace_back(d2, gb);
+            }
+            std::sort(cand.begin(), cand.end(),
+                      [](auto& x, auto& y){ return x.first < y.first; });
+            int cnt = 0;
+            for (auto& pr : cand) {
+                eb.add(ga, pr.second, /*topo=*/true, /*geom=*/false);
+                if (++cnt >= kmax) break;
+            }
+        }
+    };
+
+    // Iterate each skeleton edge (u, v) once; connect both directions
+    for (const auto& u : PD.gskel) {
+        auto itU = vids_to_gids.find(u.vid);
+        if (itU == vids_to_gids.end()) continue;
+        const auto& gids_u = itU->second;
+
+        for (int vvid : u.nb_ids) {
+            if (u.vid >= vvid) continue; // undirected: handle once
+            auto itV = vids_to_gids.find(vvid);
+            if (itV == vids_to_gids.end()) continue;
+            const auto& gids_v = itV->second;
+
+            // u -> v
+            connect_side(gids_u, gids_v, cfg_.topo_kmax);
+            // v -> u (symmetry to ensure every viewpoint on v can latch onto u)
+            connect_side(gids_v, gids_u, cfg_.topo_kmax);
+
+            // Optional: ensure at least one connection per side
+            // (useful if LOS/radius prunes everything except one)
+            if (!gids_u.empty() && !gids_v.empty()) {
+                // Find absolute nearest pair (u,v) with LOS; add if not present
+                float best = std::numeric_limits<float>::infinity();
+                int bu=-1, bv=-1;
+                for (int ga : gids_u) {
+                    const auto& pa = PD.G.nodes[ga].pos;
+                    for (int gb : gids_v) {
+                        const auto& pb = PD.G.nodes[gb].pos;
+                        float d2 = (pa - pb).squaredNorm();
+                        if (d2 < best && d2 <= r2 && line_of_sight(pa, pb)) { best = d2; bu = ga; bv = gb; }
+                    }
+                }
+                if (bu!=-1) eb.add(bu, bv, /*topo=*/true, /*geom=*/false);
+            }
+        }
+    }
+}
+
+void PathPlanner::build_geometric_edges() {
+    const int N = static_cast<int>(PD.G.nodes.size());
+    if (N == 0) return;
+
+    const float r2 = cfg_.geometric_radius * cfg_.geometric_radius;
+
+    // Brute-force KNN - Swap to KDtree later
+    for (int i=0; i<N; ++i) {
+        std::vector<std::pair<int,int>> cand;
+        const auto& ni = PD.G.nodes[i];
+        for (int j=0; j<N; ++j) {
+            if (j == i) continue;
+            const auto& nj = PD.G.nodes[j];
+            // skip if same vertex and identical k (same viewpoint)
+            if (ni.h.vid == nj.h.vid && ni.h.k == nj.h.k) continue;
+            float d2 = (ni.pos - nj.pos).squaredNorm();
+            if (d2 > r2) continue;
+            if (!line_of_sight(ni.pos, nj.pos)) continue;
+            cand.emplace_back(d2, j);
+        }
+        std::sort(cand.begin(), cand.end(), [](auto& a, auto& b){ return a.first < b.first; });
+        int cnt = 0;
+        for (auto& pr : cand) {
+            int j = pr.second;
+            PD.G.adj[i].push_back(j);
+            PD.G.adjf[i].push_back({ /*is_topological=*/false, /*is_geometric=*/true });
+            PD.G.adj[j].push_back(i);
+            PD.G.adjf[j].push_back({ /*is_topological=*/false, /*is_geometric=*/true });
+            if (++cnt >= cfg_.geom_kmax) break;
+        }
+    }
+}
+
+bool PathPlanner::line_of_sight(const Eigen::Vector3f& a, const Eigen::Vector3f& b) {
+    if (!octree_ || !PD.gmap || PD.gmap->empty()) {
+        return 0; // nothing to do...
+    }
+
+    Eigen::Vector3f d = b - a;
+    float L = d.norm();
+    if (L <= 1e-6f) return 1;
+    Eigen::Vector3f u = d / L;
+
+    pcl::octree::OctreePointCloudSearch<pcl::PointXYZ>::AlignedPointTVector centers;
+    octree_->getIntersectedVoxelCenters(a, u, centers);
+
+    const float tol = 0.6f * cfg_.map_voxel_size;
+    const float tol2 = tol * tol;
+    for (const auto& c : centers) {
+        Eigen::Vector3f cv = c.getVector3fMap();
+        if ((cv - a).squaredNorm() <= tol2) continue;
+        if ((cv - b).squaredNorm() <= tol2) continue;
+        return 0;
+    }
+    return 1;
+}
 
 void PathPlanner::merge_viewpoints(Vertex& vcur, const Vertex& vin) {
     auto is_full_set_replacement = [&](const Vertex& was, const Vertex& now) -> bool {
@@ -166,3 +333,67 @@ IDEAS:
 - Some path reward
 
 */
+
+
+
+
+
+
+
+
+// void PathPlanner::build_topological_edges() {
+//     const int N = static_cast<int>(PD.G.nodes.size());
+//     if (N == 0) return;
+
+//     auto add_undir_topo = [&](int a, int b) {
+//         PD.G.adj[a].push_back(b);
+//         PD.G.adjf[a].push_back({true, false});
+//         PD.G.adj[b].push_back(a);
+//         PD.G.adjf[b].push_back({true, false});
+//     };
+
+//     std::unordered_map<int, std::vector<int>> vids_to_gids;
+//     vids_to_gids.reserve(PD.gskel.size() * 2);
+//     for (const auto& n : PD.G.nodes) {
+//         vids_to_gids[n.h.vid].push_back(n.gid);
+//     }
+
+//     // for each skeleton edge (u <-> v), connect K nearest pair
+//     for (const auto& u : PD.gskel) {
+//         const auto& Nu = u.nb_ids; // nbs to vertex u
+//         auto itU = vids_to_gids.find(u.vid); // find graph index to 
+//         if (itU == vids_to_gids.end()) continue;
+//         const auto& gids_u = itU->second;
+
+//         for (int vvid : Nu) {
+//             if (u.vid >= vvid) continue; // only wire edge once (undirected)
+
+//             auto itV = vids_to_gids.find(vvid);
+//             if (itV == vids_to_gids.end()) continue;
+//             const auto& gids_v = itV->second;
+
+//             // for each node on u, pick the kmax nearest nodes on v within radius
+//             for (int gu : gids_u) {
+//                 std::vector<std::pair<int,int>> cand;
+//                 cand.reserve(gids_v.size());
+//                 const auto& nu = PD.G.nodes[gu];
+//                 for (int gv : gids_v) {
+//                     const auto& nv = PD.G.nodes[gv];
+//                     float d2 = (nu.pos - nv.pos).squaredNorm();
+//                     // if (cfg_.topo_radius > 0.0f && d2 > r2) continue;
+
+//                     if (!line_of_sight(nu.pos, nv.pos)) continue; 
+//                     cand.emplace_back(d2, gv);
+//                 }
+//                 std::sort(cand.begin(), cand.end(), [](auto& a, auto&b){ return a.first < b.first; });
+//                 int cnt = 0;
+//                 for (auto& pr : cand) {
+//                     int j = pr.second;
+//                     add_undir_topo(gu, j);
+                    
+//                     if (++cnt >= cfg_.topo_kmax) break;
+//                 }
+//             }
+//         }
+//     }
+// }

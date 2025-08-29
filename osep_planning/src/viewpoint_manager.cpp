@@ -10,13 +10,14 @@ TODO: Incorporate 2d_local_costmap into the viewpoint sampling process.
 
 ViewpointManager::ViewpointManager(const ViewpointConfig& cfg) : cfg_(cfg) {
     VD.gmap.reset(new pcl::PointCloud<pcl::PointXYZ>);
-    VD.gmap->points.reserve(50000);
+    // VD.gmap->points.reserve(50000);
+    // octree_ = std::make_shared<pcl::octree::OctreePointCloudSearch<pcl::PointXYZ>>(cfg_.map_voxel_size);
+
     VD.gskel.reserve(1000);
     VD.global_vpts.reserve(5000);
     VD.updated_vertices.reserve(100);
     running = 1;
 
-    octree_ = std::make_shared<pcl::octree::OctreePointCloudSearch<pcl::PointXYZ>>(cfg_.map_voxel_size);
 }
 
 void ViewpointManager::update_skeleton(const std::vector<Vertex>& verts) {
@@ -152,7 +153,7 @@ bool ViewpointManager::fetch_updates() {
     // Update octree map bounds...
     Eigen::Vector4f minpt, maxpt;
     pcl::getMinMax3D(*VD.gmap, minpt, maxpt);
-    const float pad = std::max({ cfg_.vpt_disp_dist, 1.1f * 20.0f, 2.0f * static_cast<float>(octree_->getResolution()) });
+    const float pad = std::max({ cfg_.vpt_safe_dist, 1.1f * 20.0f, 2.0f * static_cast<float>(octree_->getResolution()) });
 
     octree_->deleteTree();
     octree_->setInputCloud(VD.gmap);
@@ -416,7 +417,7 @@ std::vector<Viewpoint> ViewpointManager::generate_viewpoint(int idx) {
     };
 
     const float S = octree_->getResolution();
-    const float MIN_SEP = cfg_.vpt_disp_dist;
+    const float MIN_SEP = cfg_.vpt_safe_dist;
     const int MAX_ATTEMPTS = 10;
     const float STEP = std::max(0.5f * S, 0.05f);
 

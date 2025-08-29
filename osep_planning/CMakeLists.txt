@@ -19,6 +19,7 @@ find_package(sensor_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_sensor_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
+find_package(visualization_msgs REQUIRED)
 find_package(pcl_conversions REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(PCL 1.12 REQUIRED)
@@ -32,6 +33,7 @@ set(dependencies
   sensor_msgs
   geometry_msgs
   nav_msgs
+  visualization_msgs
   osep_skeleton_decomp
 )
 
