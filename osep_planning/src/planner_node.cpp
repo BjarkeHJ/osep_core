@@ -43,6 +43,8 @@ private:
         latest_map_ = std::move(msg);
     }
 
+    void publish_path();
+
     std::optional<geometry_msgs::msg::PoseStamped> get_drone_pose(const std::string& target_frame, const std::string drone_frame, const rclcpp::Duration& timeout = rclcpp::Duration::from_seconds(0.5));
     void update_skeleton(const std::vector<Vertex>& skel_in);
     void process_tick();
@@ -246,6 +248,29 @@ void PlannerNode::publish_graph() {
 
 }
 
+void PlannerNode::publish_path() {
+    const auto& path_vpts = planner_->current_path();
+    nav_msgs::msg::Path path; 
+    path.header = current_header;
+    path.poses.reserve(path_vpts.size());
+    for (const auto& vp : path_vpts) {
+        geometry_msgs::msg::PoseStamped ps;
+        ps.header = path.header;
+        ps.pose.position.x = vp.position.x();
+        ps.pose.position.y = vp.position.y();
+        ps.pose.position.z = vp.position.z();
+        ps.pose.orientation.x = vp.orientation.x();
+        ps.pose.orientation.y = vp.orientation.y();
+        ps.pose.orientation.z = vp.orientation.z();
+        ps.pose.orientation.w = vp.orientation.w();
+        path.poses.emplace_back(std::move(ps));
+    }
+
+    std::cout << "Path Message size: " << path.poses.size() << std::endl;
+
+    path_pub_->publish(path);
+}
+
 void PlannerNode::update_skeleton(const std::vector<Vertex>& skel_in) { 
     // Update or insert incoming vertices
     for (const auto& vin : skel_in) {
@@ -400,8 +425,9 @@ void PlannerNode::process_tick() {
         drone_ori.z() = pose_opt->pose.orientation.z;
         planner_->set_drone_pose(drone_pos, drone_ori);
 
-        if (planner_->plan_path(skeleton_)) {
-            // publish path etc etc...
+        if (planner_->plan(skeleton_)) {
+            // const auto& path = planner_->current_path();
+            publish_path();
         }
     }
 }
