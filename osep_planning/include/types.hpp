@@ -1,6 +1,7 @@
 #ifndef TYPES_HPP_
 #define TYPES_HPP_
 
+#include <numeric>
 #include <unordered_set>
 #include <Eigen/Core>
 #include <pcl/common/common.h>
@@ -46,14 +47,13 @@ struct GraphNode {
 struct GraphEdge {
     int to;
     float w; // weight
+    bool topo; // topo=true (topological grap) topo=false (geometric graph)
 };
 
 struct Graph {
     std::vector<GraphNode> nodes; // gid -> node 
     std::vector<std::vector<GraphEdge>> adj; // adjacency matrix
 };
-
-
 
 /* Graph Helper Functions */
 
@@ -74,14 +74,26 @@ static inline float d2(const Eigen::Vector3f& a, const Eigen::Vector3f& b) {
 }
 
 // add undirected edge if not present
-static inline void add_edge(Graph& G, int u, int v, float w, std::unordered_set<uint64_t>& edge_set) {
+static inline void add_edge(Graph& G, int u, int v, float w, std::unordered_set<uint64_t>& edge_set, bool topo=true) {
     if (u == v) return;
     uint64_t k = ek(u, v);
     if (edge_set.insert(k).second) {
-        G.adj[u].push_back({v, w});
-        G.adj[v].push_back({u, w});
+        G.adj[u].push_back({v, w, topo});
+        G.adj[v].push_back({u, w, topo});
     }
 }
 
+
+struct DSU {
+    std::vector<int> p, r;
+    explicit DSU(int n): p(n), r(n,0) { std::iota(p.begin(), p.end(), 0); }
+    int f(int x){ return p[x]==x?x:p[x]=f(p[x]); }
+    bool uni(int a,int b){
+        a=f(a); b=f(b); if(a==b) return false;
+        if(r[a]<r[b]) std::swap(a,b);
+        p[b]=a; if(r[a]==r[b]) r[a]++;
+        return true;
+    }
+};
 
 #endif

@@ -11,6 +11,9 @@ ROS2 Node for Path Planning
 #include <mutex>
 #include <unordered_set>
 #include <rclcpp/rclcpp.hpp>
+#include <tf2_ros/buffer.h>
+#include <tf2_ros/transform_listener.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp> 
 
 #include <pcl_conversions/pcl_conversions.h>
 #include <sensor_msgs/msg/point_cloud2.hpp>
@@ -40,6 +43,7 @@ private:
         latest_map_ = std::move(msg);
     }
 
+    std::optional<geometry_msgs::msg::PoseStamped> get_drone_pose(const std::string& target_frame, const std::string drone_frame, const rclcpp::Duration& timeout = rclcpp::Duration::from_seconds(0.5));
     void update_skeleton(const std::vector<Vertex>& skel_in);
     void process_tick();
     
@@ -47,6 +51,8 @@ private:
     rclcpp::Subscription<MsgSkeleton>::SharedPtr skel_sub_;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr map_sub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
+    std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
+    std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
     rclcpp::TimerBase::SharedPtr tick_timer_;
 
     /* Params */
@@ -124,6 +130,9 @@ PlannerNode::PlannerNode() : Node("PlannerNode") {
     vpt_pub_  = this->create_publisher<geometry_msgs::msg::PoseArray>(viewpoint_topic_, pub_qos);
     graph_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>(graph_topic_, pub_qos);
 
+    tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
+    tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
+
     tick_timer_ = this->create_wall_timer(std::chrono::milliseconds(tick_ms_), std::bind(&PlannerNode::process_tick, this));
 
     vpt_timer_ = this->create_wall_timer(std::chrono::milliseconds(200), 
@@ -142,7 +151,7 @@ void PlannerNode::publish_viewpoints() {
     for (const auto& v : skeleton_) {
         if (v.vpts.empty()) continue;
         for (const auto& vp : v.vpts) {
-            if (vp.invalid) continue;
+            // if (vp.invalid) continue;
             geometry_msgs::msg::Pose p;
             p.position.x = vp.position.x();
             p.position.y = vp.position.y();
@@ -158,7 +167,83 @@ void PlannerNode::publish_viewpoints() {
 }
 
 void PlannerNode::publish_graph() {
-    return;
+    if (!planner_) return;
+    const Graph& g = planner_->get_graph();
+    const int N = g.nodes.size();
+    if (N == 0 || static_cast<int>(g.adj.size()) != N) return;
+
+    visualization_msgs::msg::MarkerArray arr;
+    // Clear previous markers
+    {
+        visualization_msgs::msg::Marker clr;
+        clr.header = current_header;
+        clr.ns = "graph";
+        clr.id = 0;
+        clr.action = visualization_msgs::msg::Marker::DELETEALL;
+        arr.markers.push_back(clr);
+    }
+
+    auto eigenToPoint = [](const Eigen::Vector3f& p) {
+        geometry_msgs::msg::Point q;
+        q.x = p.x(); q.y = p.y(); q.z = p.z();
+        return q;
+    };
+
+    auto weightToColor = [](float w) {
+        // map weight → color, here blue(low)→red(high)
+        std_msgs::msg::ColorRGBA c;
+        float t = std::clamp(w / 10.0f, 0.0f, 1.0f); // scale weights (adjust divisor!)
+        c.r = t;
+        c.g = 0.2f * (1.0f - t);
+        c.b = 1.0f - t;
+        c.a = 0.9f;
+        return c;
+    };
+
+    // ---------- Edges (LINE_LIST) ----------
+    {
+        visualization_msgs::msg::Marker m;
+        m.header = current_header;
+        m.ns = "graph_edges";
+        m.id = 2;
+        m.type = visualization_msgs::msg::Marker::LINE_LIST;
+        m.action = visualization_msgs::msg::Marker::ADD;
+        m.lifetime = rclcpp::Duration(0,0); // forever
+        m.pose.orientation.w = 1.0;
+        m.scale.x = 0.03;  // line width
+        m.color.r = 1.0f;
+        m.color.g = 1.0f;
+        m.color.b = 1.0f;
+        m.color.a = 0.85f;
+
+        // We’ll only add (u,v) with u < v to avoid duplicates
+        size_t edge_pairs = 0;
+        for (int u = 0; u < N; ++u) edge_pairs += g.adj[u].size();
+        edge_pairs /= 2; // rough upper bound for reserving
+        m.points.reserve(edge_pairs * 2);
+
+        for (int u = 0; u < N; ++u) {
+            const auto& Nu = g.adj[u];
+            const auto& pu = g.nodes[u].p;
+            for (const auto& e : Nu) {
+                const int v = e.to;
+                if (v <= u) continue; // dedup undirected
+                const auto& pv = g.nodes[v].p;
+                std_msgs::msg::ColorRGBA c = weightToColor(e.w);
+                m.points.push_back(eigenToPoint(pu));
+                m.colors.push_back(c);
+                m.points.push_back(eigenToPoint(pv));
+                m.colors.push_back(c);
+            }
+        }
+        arr.markers.push_back(std::move(m));
+    }
+
+    // ---------- (Optional) Edge Direction Arrows ----------
+    // If you later add directed edges, create a Marker with type=ARROW per edge.
+
+    graph_pub_->publish(arr);
+
 }
 
 void PlannerNode::update_skeleton(const std::vector<Vertex>& skel_in) { 
@@ -195,7 +280,6 @@ void PlannerNode::update_skeleton(const std::vector<Vertex>& skel_in) {
         if (incoming.count(skeleton_[i].vid)) continue; // still valid
         
         int last = static_cast<int>(skeleton_.size()) - 1;
-        int erased_vid = skeleton_[i].vid;
         // swap and pop back
         if (i != last) {
             std::swap(skeleton_[i], skeleton_[last]);
@@ -208,6 +292,34 @@ void PlannerNode::update_skeleton(const std::vector<Vertex>& skel_in) {
     vid2idx_.reserve(skeleton_.size());
     for (int i=0; i<static_cast<int>(skeleton_.size()); ++i) {
         vid2idx_[skeleton_[i].vid] = i;
+    }
+}
+
+std::optional<geometry_msgs::msg::PoseStamped> PlannerNode::get_drone_pose(const std::string& target_frame, const std::string drone_frame, const rclcpp::Duration& timeout) {
+    const auto tf_timeout = tf2::durationFromSec(timeout.seconds());
+    if (!tf_buffer_->canTransform(target_frame, drone_frame, tf2::TimePointZero, tf_timeout)) {
+        RCLCPP_WARN(this->get_logger(), "TF not available: %s -> %s", drone_frame.c_str(), target_frame.c_str());
+        return std::nullopt;
+    }
+
+    try {
+        // auto T = tf_buffer_->lookupTransform(target_frame, drone_frame, tf2::TimePointZero);
+        geometry_msgs::msg::PoseStamped drone_pose_in, drone_pose_out;
+        drone_pose_in.header.frame_id = drone_frame;
+        drone_pose_in.header.stamp = rclcpp::Time(0, 0, get_clock()->get_clock_type());
+        drone_pose_in.pose.position.x = 0.0;
+        drone_pose_in.pose.position.y = 0.0;
+        drone_pose_in.pose.position.z = 0.0;
+        drone_pose_in.pose.orientation.w = 1.0; // identity
+
+        // Convert pose into target frame (uses the same latest transform)
+        drone_pose_out = tf_buffer_->transform(drone_pose_in, target_frame, tf_timeout);
+        
+        return drone_pose_out;
+    }
+    catch (const tf2::TransformException& ex) {
+        RCLCPP_WARN(this->get_logger(), "TF expection: %s", ex.what());
+        return std::nullopt;
     }
 }
 
@@ -278,6 +390,16 @@ void PlannerNode::process_tick() {
     vpman_->set_vid2idx(vid2idx_); // Store current vid mapping in vpman_
     if (vpman_->update_viewpoints(skeleton_)) {
         planner_->set_vid2idx(vid2idx_); // Store current vid mapping in vpman_
+
+        auto pose_opt = get_drone_pose("odom", "lidar"); // CHANGE TO DRONE FRAME!!
+        Eigen::Vector3f drone_pos(pose_opt->pose.position.x, pose_opt->pose.position.y, pose_opt->pose.position.z);
+        Eigen::Quaternionf drone_ori;
+        drone_ori.w() = pose_opt->pose.orientation.w;
+        drone_ori.x() = pose_opt->pose.orientation.x;
+        drone_ori.y() = pose_opt->pose.orientation.y;
+        drone_ori.z() = pose_opt->pose.orientation.z;
+        planner_->set_drone_pose(drone_pos, drone_ori);
+
         if (planner_->plan_path(skeleton_)) {
             // publish path etc etc...
         }
