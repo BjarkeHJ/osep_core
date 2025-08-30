@@ -86,8 +86,11 @@ void PathInterpolator::updateGroundTruthTrajectory() {
 		RCLCPP_WARN(this->get_logger(), "Invalid current position, skipping update");
 		return;
 	}
+	// Set the timestamp for the current pose
+	rclcpp::Time now = this->now();
+	current_position.header.stamp = now;
 	ground_truth_trajectory_.header.frame_id = costmap_->header.frame_id;
-	ground_truth_trajectory_.header.stamp = this->now();
+	ground_truth_trajectory_.header.stamp = now;
 	ground_truth_trajectory_.poses.push_back(current_position);
 	ground_truth_trajectory_pub_->publish(ground_truth_trajectory_);
 }
