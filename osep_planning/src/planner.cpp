@@ -42,6 +42,7 @@ bool PathPlanner::build_graph(std::vector<Vertex>& gskel) {
             const Viewpoint& vp = v.vpts[k];
 
             // if (vp.invalid) continue;
+            if (vp.visited) continue;
             GraphNode n;
             n.vptid = vp.vptid; // set unique handle id
             n.gid = static_cast<int>(G.nodes.size());
@@ -145,6 +146,7 @@ bool PathPlanner::rh_plan_tick() {
     }
 
     if (PD.rhs.start_id == 0ull) { // default 0 unsigned long long
+        std::cout << "[RH PLANNER] Setting new starting point!" << std::endl;
         int start_gid = pick_start_gid_near_drone(); // get graph index of starting point
         if (start_gid < 0) return 0;
         PD.rhs.start_id = PD.g2h[start_gid]; // set start id as corresponding unique id
@@ -180,6 +182,7 @@ bool PathPlanner::rh_plan_tick() {
         }
     }
     bool had_prev_plan = !prev_exec_gids.empty();
+    had_prev_plan = false;
     
     // Extract subgraph around start
     auto cand = build_subgraph(start_gid); // subgraph gids
@@ -658,6 +661,109 @@ std::vector<int> PathPlanner::expand_to_graph_path(const std::vector<int>& order
 
 
 
+/* Public methods for Control updates */
+bool PathPlanner::get_next_target(Viewpoint& out) {
+    if (PD.rhs.next_target_id == 0ull) return false;
+
+    auto it = PD.h2g.find(PD.rhs.next_target_id);
+    if (it == PD.h2g.end()) return false;
+    int g = it->second;
+    if (g < 0 || g >= static_cast<int>(PD.graph.nodes.size())) return false;
+
+    const GraphNode& gn = PD.graph.nodes[g];
+    out.position = gn.p;
+    out.yaw = gn.yaw;
+    out.orientation = yaw_to_quat(gn.yaw);
+    out.target_vid = gn.vid;
+    out.target_vp_pos = gn.k;
+    out.in_path = true;
+    return true;
+}
+
+bool PathPlanner::get_start(Viewpoint& out) {
+    if (PD.rhs.start_id == 0ull) return false;
+    auto it = PD.h2g.find(PD.rhs.start_id);
+    if (it == PD.h2g.end()) return false;
+    int g = it->second;
+    if (g < 0 || g >= static_cast<int>(PD.graph.nodes.size())) return false;
+    const GraphNode& gn = PD.graph.nodes[g];
+    out.position = gn.p;
+    out.yaw = gn.yaw;
+    out.orientation = yaw_to_quat(gn.yaw);
+    out.target_vid = gn.vid;
+    out.target_vp_pos = gn.k;
+    out.in_path = true;
+    return true;
+}
+
+bool PathPlanner::notify_reached(std::vector<Vertex>& gskel) {
+    if (PD.rhs.next_target_id == 0ull) return false;
+    
+    (void)mark_visited_in_skeleton(PD.rhs.next_target_id, gskel);
+
+    PD.rhs.visited.insert(PD.rhs.next_target_id);
+    PD.rhs.start_id = PD.rhs.next_target_id;
 
 
+    uint64_t new_next = 0ull;
+    bool past_anchor = false;
+    for (uint64_t h : PD.rhs.exec_path_ids) {
+        if (!past_anchor) {
+            if (h == PD.rhs.start_id) {
+                past_anchor = true;
+                continue;
+            }
+        }
+        if (!h) continue;
+        if (PD.rhs.visited.count(h) == 0) {
+            new_next = h;
+            break;
+        }
+    }
+    PD.rhs.next_target_id = new_next;
+    return true;
+}
 
+bool PathPlanner::mark_visited_in_skeleton(uint64_t hid, std::vector<Vertex>& gskel) {
+    if (!hid) return false;
+
+    int gid = -1;
+    auto it = PD.h2g.find(hid);
+    if (it == PD.h2g.end()) return false;
+    gid = it->second;
+
+    int vid = -1;
+    int k = -1;
+
+    if (gid >= 0 && gid < static_cast<int>(PD.graph.nodes.size())) {
+        const auto& gn = PD.graph.nodes[gid];
+        vid = gn.vid;
+        k = gn.k;
+    }
+    else {
+        // fallback: try to derive from handle
+        vid = static_cast<int>(hid >> 32);
+        k = -1;
+    }
+
+    auto itV = gskel_vid2idx.find(vid);
+    if (itV == gskel_vid2idx.end()) return false;
+    Vertex& vx = gskel[itV->second];
+
+    if (k >= 0 && k < static_cast<int>(vx.vpts.size()) && vx.vpts[k].vptid == hid) {
+        vx.vpts[k].visited = true;
+        // vx.vpts[k].in_path = false;
+        return true;
+    }
+
+    for (auto& vp : vx.vpts) {
+        if (vp.vptid == hid) {
+            vp.visited = true;
+            // vp.in_path = false;
+            return true;
+        }
+    }
+
+    std::cout << "[MARK VISITED] Viewpoint Not Found!" << std::endl;
+    return false; // not found this tick
+}

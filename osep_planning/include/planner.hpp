@@ -77,6 +77,10 @@ public:
 
     const std::vector<Viewpoint>& current_path() { return PD.path_out; }
 
+    bool get_next_target(Viewpoint& out);
+    bool get_start(Viewpoint& out);
+    bool notify_reached(std::vector<Vertex>& gskel);
+
 private:
     /* Functions */
     bool build_graph(std::vector<Vertex>& gskel);
@@ -94,9 +98,10 @@ private:
     std::vector<int> greedy_orienteering(const std::vector<int>& cand, int start_gid, const std::vector<std::vector<float>>& D);
     void two_opt_improve(std::vector<int>& order, const std::vector<std::vector<float>>& D, const std::unordered_map<int,int>& loc);
     std::vector<int> expand_to_graph_path(const std::vector<int>& order, const std::vector<int>& cand, const std::vector<std::vector<int>>& parent);
+
+    bool mark_visited_in_skeleton(uint64_t hid, std::vector<Vertex>& gskel);
     
     inline Eigen::Quaternionf yaw_to_quat(float yaw) { return Eigen::Quaternionf(Eigen::AngleAxisf(yaw, Eigen::Vector3f::UnitZ())); }
-
 
     /* Params & Data */
     pcl::PointCloud<pcl::PointXYZ>::ConstPtr gmap;

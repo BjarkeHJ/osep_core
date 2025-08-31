@@ -47,15 +47,20 @@ private:
 
     std::optional<geometry_msgs::msg::PoseStamped> get_drone_pose(const std::string& target_frame, const std::string drone_frame, const rclcpp::Duration& timeout = rclcpp::Duration::from_seconds(0.5));
     void update_skeleton(const std::vector<Vertex>& skel_in);
-    void process_tick();
+
+    void process_tick(); // handles planning (slower)
+    void control_tick(); // handles target checking (faster)
     
     /* ROS2 */
     rclcpp::Subscription<MsgSkeleton>::SharedPtr skel_sub_;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr map_sub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
+    rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr target_pub_;
+
     std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
     std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
     rclcpp::TimerBase::SharedPtr tick_timer_;
+    rclcpp::TimerBase::SharedPtr ctl_timer_;
 
     /* Params */
     ViewpointConfig vpman_cfg;
@@ -63,10 +68,14 @@ private:
     std::string skeleton_topic_;
     std::string map_topic_;
     std::string path_topic_;
+    std::string target_topic_;
+
     std::string viewpoint_topic_; // vis
     std::string graph_topic_; // vis
     int tick_ms_;
+    int ctl_ms_;
     float map_voxel_size_;
+    float reached_dist_th_;
 
     /* Data */
     MsgSkeleton::ConstSharedPtr latest_skel_;
@@ -79,6 +88,7 @@ private:
 
     /* Utils */
     std::mutex mtx_;
+    std::mutex planner_api_mtx_;
     std::unique_ptr<ViewpointManager> vpman_;
     std::unique_ptr<PathPlanner> planner_;
 
@@ -94,12 +104,16 @@ private:
 PlannerNode::PlannerNode() : Node("PlannerNode") {
     /* LAUNCH FILE PARAMETER DECLARATIONS */
     tick_ms_ = declare_parameter<int>("tick_ms", 200);
+    ctl_ms_ = declare_parameter<int>("control_ms", 50);
     map_voxel_size_ = declare_parameter<float>("map_voxel_size", 1.0f);
+    reached_dist_th_ = declare_parameter<float>("reached_dist_th", 1.0f);
 
     // TOPICS
     skeleton_topic_ = declare_parameter<std::string>("skeleton_topic", "/osep/gskel/global_skeleton_vertices");
     map_topic_ = declare_parameter<std::string>("map_topic", "/osep/lidar_map/global_map");
     path_topic_ = declare_parameter<std::string>("path_topic", "/osep/planner/path");
+    target_topic_ = declare_parameter<std::string>("target_topic", "/osep/planner/target");
+
     viewpoint_topic_ = declare_parameter<std::string>("viewpoints_topic", "/osep/planner/viewpoints"); // vis
     graph_topic_= declare_parameter<std::string>("graph_topic", "/osep/planner/graph"); // vis
 
@@ -109,7 +123,6 @@ PlannerNode::PlannerNode() : Node("PlannerNode") {
 
     // PATHPLANNER
     planner_cfg.map_voxel_size = map_voxel_size_;
-    
 
     /* OBJECT INITIALIZATION */
     vpman_ = std::make_unique<ViewpointManager>(vpman_cfg);
@@ -130,6 +143,9 @@ PlannerNode::PlannerNode() : Node("PlannerNode") {
 
     auto pub_qos = rclcpp::QoS(rclcpp::KeepLast(5)).reliable();
     path_pub_ = this->create_publisher<nav_msgs::msg::Path>(path_topic_, pub_qos);
+    target_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(target_topic_, pub_qos);
+
+
     vpt_pub_  = this->create_publisher<geometry_msgs::msg::PoseArray>(viewpoint_topic_, pub_qos);
     graph_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>(graph_topic_, pub_qos);
 
@@ -137,6 +153,7 @@ PlannerNode::PlannerNode() : Node("PlannerNode") {
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
 
     tick_timer_ = this->create_wall_timer(std::chrono::milliseconds(tick_ms_), std::bind(&PlannerNode::process_tick, this));
+    ctl_timer_ = this->create_wall_timer(std::chrono::milliseconds(ctl_ms_), std::bind(&PlannerNode::control_tick, this));
 
     vpt_timer_ = this->create_wall_timer(std::chrono::milliseconds(200), 
         [this]{ publish_viewpoints(); publish_graph(); });
@@ -431,6 +448,80 @@ void PlannerNode::process_tick() {
             publish_path();
         }
     }
+}
+
+void PlannerNode::control_tick() {
+    auto pose_opt = get_drone_pose("odom", "lidar");
+    if (!pose_opt) return;
+
+    Eigen::Vector3f drone_pos(pose_opt->pose.position.x,
+                              pose_opt->pose.position.y,
+                              pose_opt->pose.position.z);
+    
+    const float pass_xt = 2.0f * reached_dist_th_;
+    const int max_consume = 1;
+
+    float dist_to_tgt;
+
+    for (int iter=0; iter<max_consume; ++iter) {
+        Viewpoint tgt, anch;
+        {
+            std::scoped_lock lk(planner_api_mtx_);
+            if (!planner_->get_next_target(tgt)) {
+                std::cout << "Could not get next target!" << std::endl;
+                break;
+            }
+            if (!planner_->get_start(anch)) {
+                if ( (tgt.position - drone_pos).norm() <= reached_dist_th_ ) {
+                    planner_->notify_reached(skeleton_);
+                }
+                else break;
+                continue;
+            }
+        }
+
+        dist_to_tgt = (tgt.position - drone_pos).norm();
+        std::cout << "Distance to target: " << dist_to_tgt << std::endl;
+        bool reached = dist_to_tgt <= reached_dist_th_;
+        bool passed = false;
+        {
+            Eigen::Vector3f a = anch.position;
+            Eigen::Vector3f b = tgt.position;
+            Eigen::Vector3f ab = b-a;
+            float L2 = ab.squaredNorm();
+            if (L2 > 1e-6f) {
+                Eigen::Vector3f ap = drone_pos - a;
+                float t = ap.dot(ab) / L2;
+                Eigen::Vector3f xtrack = ap - t*ab;
+                float d_xt = xtrack.norm();
+                passed = (t >= 1.0f) && (d_xt <= pass_xt);
+            }
+        }
+
+        if (!(reached || passed)) break;
+    
+        {
+            std::scoped_lock lk(planner_api_mtx_);
+            planner_->notify_reached(skeleton_);
+        }
+    }
+
+    Viewpoint tgt;
+    {
+        std::scoped_lock lk(planner_api_mtx_);
+        if (!planner_->get_next_target(tgt)) return;
+    }
+
+    geometry_msgs::msg::PoseStamped msg;
+    msg.header = current_header;
+    msg.pose.position.x = tgt.position.x();
+    msg.pose.position.y = tgt.position.y();
+    msg.pose.position.z = tgt.position.z();
+    msg.pose.orientation.x = tgt.orientation.x();
+    msg.pose.orientation.y = tgt.orientation.y();
+    msg.pose.orientation.z = tgt.orientation.z();
+    msg.pose.orientation.w = tgt.orientation.w();
+    target_pub_->publish(msg);
 }
 
 int main(int argc, char** argv) {
