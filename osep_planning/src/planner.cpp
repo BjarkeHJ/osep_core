@@ -199,7 +199,7 @@ bool PathPlanner::rh_plan_tick() {
     cand.erase(std::remove_if(cand.begin(), cand.end(), is_visited_gid), cand.end());
 
     // distances on subgraph
-    std::vector<std::vector<float>> D; // distances between graph nodes
+    std::vector<std::vector<float>> D; // distances between graph nodes (edge weights)
     std::vector<std::vector<int>> parent; // gid predecessors from source (cand[i])
     compute_apsp(cand, D, parent);
 
@@ -247,18 +247,21 @@ bool PathPlanner::rh_plan_tick() {
     PD.rhs.exec_path_ids.reserve(exec_gids.size());
     for (int g : exec_gids) {
         uint64_t vptid = PD.g2h[g];
-        if (vptid != 0ull) {
-            PD.rhs.exec_path_ids.push_back(vptid);
-        }
+        if (vptid == 0ull) continue;
+        // if (vptid == PD.rhs.start_id) continue;
+        if (PD.rhs.visited.count(vptid)) continue;
+        PD.rhs.exec_path_ids.push_back(vptid);
     }
 
     PD.rhs.last_plan_score = score;
 
     // choose next planning target
-    PD.rhs.next_target_id = (PD.rhs.exec_path_ids.size() >= 2)
-                             ? PD.rhs.exec_path_ids[1]
-                             : PD.rhs.exec_path_ids.front();
+    // PD.rhs.next_target_id = (PD.rhs.exec_path_ids.size() >= 2)
+    //                          ? PD.rhs.exec_path_ids[1]
+    //                          : PD.rhs.exec_path_ids.front();
     
+    PD.rhs.next_target_id = PD.rhs.exec_path_ids.front(); // make first element the target for velocity controller
+
     return 1;
 }
 
@@ -459,19 +462,6 @@ std::vector<int> PathPlanner::greedy_orienteering(const std::vector<int>& cand, 
     std::vector<int> order;
     order.push_back(start_gid);
     float used = 0.0f;
-
-    // auto path_cost = [&](const std::vector<int>& ord) -> float {
-    //     float c = 0.0f;
-    //     for (int i=0; i+1<static_cast<int>(ord.size()); ++i) {
-    //         int a = loc[ord[i]];
-    //         int b = loc[ord[i+1]];
-    //         float d = D[a][b];
-
-    //         if (!std::isfinite(d)) return std::numeric_limits<float>::infinity();
-    //         c += d;
-    //     }
-    //     return c;
-    // };
 
     auto insert_gain = [&](int k_gid, int pos) -> std::pair<float, float> {
         // delta cost if insert k between pos-1 and pos
@@ -767,3 +757,17 @@ bool PathPlanner::mark_visited_in_skeleton(uint64_t hid, std::vector<Vertex>& gs
     std::cout << "[MARK VISITED] Viewpoint Not Found!" << std::endl;
     return false; // not found this tick
 }
+
+
+
+
+
+/* 
+
+TODO:
+- Change graph build to geometric and implement edge weigthing bonus for topological graphs (same vertex or adjacent vertex)
+- Incorporate with controller -> run true sim
+- viewpoint manager: delete viewpoints accordingly
+- Tune weightings for the planner (understand it)
+
+*/
