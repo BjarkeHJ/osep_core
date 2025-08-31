@@ -49,7 +49,6 @@ static inline void add_edge(Graph& G, int u, int v, float w, std::unordered_set<
     }
 }
 
-
 struct DSU {
     std::vector<int> p, r;
     explicit DSU(int n): p(n), r(n,0) { std::iota(p.begin(), p.end(), 0); }

@@ -31,6 +31,8 @@ bool PathPlanner::plan(std::vector<Vertex>& gskel) {
 }
 
 bool PathPlanner::build_graph(std::vector<Vertex>& gskel) {
+    /* CHANGE THIS TO MY ORIGINAL WORK AND CLASSIFY EDGES BASED ON VERTEX ADJACENCY */
+
     PD.graph.nodes.clear();
     PD.graph.adj.clear();
     Graph G;
@@ -133,6 +135,7 @@ bool PathPlanner::rh_plan_tick() {
         return 0;
     }
 
+    std::cout << PD.rhs.start_gid << std::endl;
     if (PD.rhs.start_gid < 0) {
         PD.rhs.start_gid = pick_start_gid_near_drone();
         if (PD.rhs.start_gid < 0) return 0;
@@ -179,6 +182,7 @@ bool PathPlanner::rh_plan_tick() {
     if (!accept) return 0;
 
     auto exec = expand_to_graph_path(order, cand, parent);
+    if (exec.empty()) return 0;
 
     PD.rhs.coarse_order = std::move(order);
     PD.rhs.exec_path_gids = std::move(exec);
@@ -319,16 +323,18 @@ void PathPlanner::compute_apsp(const std::vector<int>& cand, std::vector<std::ve
     D.assign(M, std::vector<float>(M, std::numeric_limits<float>::infinity()));
     parent.assign(M, std::vector<int>(PD.graph.nodes.size(), -1));
 
+    // Only compute for subgraph
     std::vector<char> allow(PD.graph.nodes.size(), 0);
     for (int gid: cand) {
         allow[gid] = 1;
     }
 
+    // For each candidate in subgraph -> compute shortest distance to any other node in subgraph
     std::vector<float> dist;
     std::vector<int> par;
     for (int i=0; i<M; ++i) {
-        int s = cand[i];
-        dijkstra(allow, s, dist, par);
+        int src = cand[i];
+        dijkstra(allow, src, dist, par);
 
         for (int j=0; j<M; ++j) {
             D[i][j] = dist[cand[j]];
@@ -352,7 +358,7 @@ void PathPlanner::dijkstra(const std::vector<char>& allow, int s, std::vector<fl
         if (d != dist[u]) continue;
         for (const auto& e : PD.graph.adj[u]) {
             int v = e.to;
-            if (!allow[v]) continue; // not in subgraph
+            if (!allow[v]) continue; // not in subgraph (not allowed)
             float w = edge_cost(e);
             if (dist[v] > d + w) {
                 dist[v] = d + w;
@@ -497,84 +503,40 @@ void PathPlanner::two_opt_improve(std::vector<int>& order, const std::vector<std
 
 std::vector<int> PathPlanner::expand_to_graph_path(const std::vector<int>& order, const std::vector<int>& cand, const std::vector<std::vector<int>>& parent) {
     // cand[i] is gid; Parent[i][g] gives predecessor of g in shortest path from cand[i]
-    // std::unordered_map<int,int> loc;
-    // loc.reserve(cand.size() * 2);
-    // for (int i=0; i<static_cast<int>(cand.size()); ++i) {
-    //     loc[cand[i]] = i;
-    // }
+    std::unordered_map<int,int> loc;
+    loc.reserve(cand.size() * 2);
+    for (int i=0; i<static_cast<int>(cand.size()); ++i) {
+        loc[cand[i]] = i;
+    }
 
-    // std::vector<int> exec;
-    // exec.reserve(256);
-    // if (order.empty()) return exec;
-    // exec.push_back(order.front());
+    std::vector<int> exec;
+    exec.reserve(256);
+    if (order.empty()) return exec;
+    exec.push_back(order.front());
 
-    // for (size_t t=1; t<order.size(); ++t) {
-    //     int src = order[t-1];
-    //     int dst = order[t];
-    //     int is = loc[src];
-    //     // int id = loc[dst];
-
-    //     // reconstruct path src -> dst
-    //     std::vector<int> rev;
-    //     rev.reserve(64);
-    //     int cur = dst;
-    //     while (cur != -1 && cur != src) {
-    //         rev.push_back(cur);
-    //         cur = parent[is][cur];
-    //     }
-
-    //     if (cur == -1) continue; // unreachable 
-
-    //     // append in forward order, skipping the src duplication
-    //     for (int i=static_cast<int>(rev.size()-1); i>=0; --i) {
-    //         exec.push_back(rev[i]);
-    //     }
-    // }
-    // return exec;
-
-    std::vector<int> seq;
-    if (order.empty()) return seq;
-
-    // Map gid -> local candidate index
-    std::unordered_map<int,int> loc; loc.reserve(cand.size()*2);
-    for (int i=0;i<(int)cand.size();++i) loc[cand[i]] = i;
-
-    // Start at the first node
-    seq.push_back(order.front());
-
-    for (size_t t = 1; t < order.size(); ++t) {
+    for (size_t t=1; t<order.size(); ++t) {
         int src = order[t-1];
         int dst = order[t];
-        auto itS = loc.find(src), itD = loc.find(dst);
-        if (itS == loc.end() || itD == loc.end()) {
-            // if either endpoint not in subgraph candidates, skip the hop entirely
-            // or handle as error:
-            // return {};
-            continue;
-        }
-        int is = itS->second;
+        int is = loc[src];
+        // int id = loc[dst];
 
-        // Reconstruct dst -> src by following parents from the 'src' run
+        // reconstruct path src -> dst
         std::vector<int> rev;
+        rev.reserve(64);
         int cur = dst;
-        while (cur != -1) {
+        while (cur != -1 && cur != src) {
             rev.push_back(cur);
-            if (cur == src) break;
-            cur = parent[is][cur]; // predecessor on path from src to cur
-        }
-        if (rev.empty() || rev.back() != src) {
-            // unreachable with current graph; either drop this hop or abort
-            // here we just stop expanding further
-            break;
+            cur = parent[is][cur];
         }
 
-        // Append in forward order, excluding src (already in seq tail)
-        for (int i=(int)rev.size()-2; i>=0; --i) {
-            seq.push_back(rev[i]);
+        if (cur == -1) continue; // unreachable 
+
+        // append in forward order, skipping the src duplication
+        for (int i=static_cast<int>(rev.size()-1); i>=0; --i) {
+            exec.push_back(rev[i]);
         }
     }
-    return seq;
-
+    return exec;
 }
 
 

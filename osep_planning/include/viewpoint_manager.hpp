@@ -63,6 +63,14 @@ private:
         return octree_->radiusSearch(qp, cfg_.vpt_safe_dist, ids, d2s) > 0;
     }
 
+    /* For giving viewpoints unique handle ids for downs stream synchronization - packs vertex ID and unique viewpoint id into key*/
+    static inline uint64_t make_vpt_handle(int vid, uint32_t seq) {
+        return ( (uint64_t(uint32_t(vid)) << 32) | uint64_t(seq));
+    }
+    
+    std::unordered_map<int, uint32_t> per_vertex_seg; // vid -> seq counter
+
+
     /* DATA */
     bool running; 
     ViewpointConfig cfg_;

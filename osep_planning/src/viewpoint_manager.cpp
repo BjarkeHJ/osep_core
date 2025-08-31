@@ -135,6 +135,10 @@ std::vector<Viewpoint> ViewpointManager::generate_viewpoints(std::vector<Vertex>
 
         float yaw = yaw_to_face(vp_pos, v_pos);
         Viewpoint vp;
+
+        uint32_t& seq = per_vertex_seg[v.vid];
+        vp.vptid = make_vpt_handle(v.vid, seq++); // give viewpoint an unique identifier (pack vid and uniquie vpt id)
+
         vp.position = vp_pos;
         vp.yaw = yaw;
         vp.orientation = yaw_to_quat(yaw);
