@@ -137,7 +137,7 @@ std::vector<Viewpoint> ViewpointManager::generate_viewpoints(std::vector<Vertex>
         Viewpoint vp;
 
         uint32_t& seq = per_vertex_seg[v.vid];
-        vp.vptid = make_vpt_handle(v.vid, seq++); // give viewpoint an unique identifier (pack vid and uniquie vpt id)
+        vp.vptid = make_vpt_handle(v.vid, ++seq); // give viewpoint an unique identifier (pack vid and uniquie vpt id)
 
         vp.position = vp_pos;
         vp.yaw = yaw;
@@ -248,79 +248,6 @@ float ViewpointManager::distance_to_free_space(const Eigen::Vector3f& p_in, cons
     // No OCC->FREE transition within MAX_DIST
     return -1.0f;
 }
-
-
-
-
-
-
-
-
-
-// std::vector<int> ViewpointManager::walk_branch(int start_idx, int nb_idx, const std::vector<char>& allowed, std::unordered_set<std::pair<int,int>, PairHash>& visited_edges) {
-//     auto edge_key = [](int u, int v) {
-//         if (u > v) std::swap(u,v);
-//         return std::make_pair(u,v);
-//     };
-
-//     auto edge_seen = [&](int a, int b) {
-//         return visited_edges.count(edge_key(a,b)) != 0;
-//     };
-    
-//     auto mark_edge = [&](int a, int b) {
-//         visited_edges.insert(edge_key(a,b));
-//     };
-
-//     std::vector<int> out_vids;
-//     out_vids.reserve(32);
-
-//     if (start_idx < 0 || nb_idx < 0) return out_vids; // invalid
-//     if (!allowed[start_idx] || !allowed[nb_idx]) return out_vids; // not allowed
-//     if (edge_seen(start_idx, nb_idx)) return out_vids; // already seen
-
-//     int prev = start_idx;
-//     int curr = nb_idx;
-
-//     out_vids.push_back(idx2vid_[start_idx]);
-
-//     while (true) {
-//         out_vids.push_back(idx2vid_[curr]);
-//         mark_edge(prev, curr);
-
-//         if (is_endpoint_[curr] && curr != start_idx) break; // found endpoint
-//         int next_idx = -1;
-
-//         for (int nb_i : VD.gadj[curr]) {
-//             if (nb_i == prev) continue;
-//             if (!allowed[nb_i]) continue;
-//             if (!edge_seen(curr, nb_i)) {
-//                 next_idx = nb_i;
-//                 break;
-//             }
-//         }
-
-//         // fallback: any nb neq prev
-//         if (next_idx == -1) {
-//             for (int nb_i : VD.gadj[curr]) {
-//                 if (nb_i != prev) {
-//                     next_idx = nb_i;
-//                     break;
-//                 }
-//             }
-//         }
-
-//         if (next_idx == -1) break; // no next found!
-
-//         prev = curr;
-//         curr = next_idx;
-//     }
-    
-//     if (out_vids.size() < 2) {
-//         out_vids.clear();
-//     }
-
-//     return out_vids;
-// }
 
 
 

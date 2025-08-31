@@ -110,6 +110,7 @@ PlannerNode::PlannerNode() : Node("PlannerNode") {
     // PATHPLANNER
     planner_cfg.map_voxel_size = map_voxel_size_;
     
+
     /* OBJECT INITIALIZATION */
     vpman_ = std::make_unique<ViewpointManager>(vpman_cfg);
     planner_ = std::make_unique<PathPlanner>(planner_cfg);

@@ -23,10 +23,6 @@ bool PathPlanner::plan(std::vector<Vertex>& gskel) {
 
     std::cout << "Planned Path - Path Lenght: " << PD.path_out.size() << std::endl;
 
-    if (PD.path_out.size() > 0) {
-        std::cout << "Path[0] x " << PD.path_out[0].position.x() << std::endl;
-    }
-
     return running;
 }
 
@@ -47,6 +43,7 @@ bool PathPlanner::build_graph(std::vector<Vertex>& gskel) {
 
             // if (vp.invalid) continue;
             GraphNode n;
+            n.vptid = vp.vptid; // set unique handle id
             n.gid = static_cast<int>(G.nodes.size());
             n.vid = v.vid;
             n.k = k;
@@ -124,39 +121,87 @@ bool PathPlanner::build_graph(std::vector<Vertex>& gskel) {
         }
     }
 
+    // handle unique viewpoint ids
+    PD.h2g.clear();
+    PD.g2h.assign(G.nodes.size(), 0ull); // 0 (as unsigned long long (64bit))
+    // PD.g2h.clear();
+    // PD.g2h.resize(G.nodes.size());
+    for (auto& n : G.nodes) {
+        if (n.vptid != 0ull) {
+            PD.h2g[n.vptid] = n.gid;
+            PD.g2h[n.gid] = n.vptid;
+        }
+    }
+
     PD.graph = std::move(G);
     return 1;
 }
 
 bool PathPlanner::rh_plan_tick() {
     if (PD.graph.nodes.empty()) {
-        PD.rhs.exec_path_gids.clear();
-        PD.rhs.next_target_gid = -1;
+        PD.rhs.exec_path_ids.clear();
+        PD.rhs.next_target_id = 0ull;
         return 0;
     }
 
-    std::cout << PD.rhs.start_gid << std::endl;
-    if (PD.rhs.start_gid < 0) {
-        PD.rhs.start_gid = pick_start_gid_near_drone();
-        if (PD.rhs.start_gid < 0) return 0;
+    if (PD.rhs.start_id == 0ull) { // default 0 unsigned long long
+        int start_gid = pick_start_gid_near_drone(); // get graph index of starting point
+        if (start_gid < 0) return 0;
+        PD.rhs.start_id = PD.g2h[start_gid]; // set start id as corresponding unique id
+        if (PD.rhs.start_id == 0ull) return 0; // still default (should not happen if vptid > 0)
     }
 
+    // Determine starting id
+    int start_gid = -1;
+    auto it = PD.h2g.find(PD.rhs.start_id);
+    if (it != PD.h2g.end()) {
+        // found match
+        start_gid = it->second;
+    }
+    else {
+        // id missing -> pick nearest and update handle
+        int sg = pick_start_gid_near_drone();
+        if (sg < 0) return 0;
+        PD.rhs.start_id = PD.g2h[sg];
+        if (PD.rhs.start_id == 0ull) return 0;
+        start_gid = sg;
+    }
+    
+    std::vector<int> prev_exec_gids;
+    prev_exec_gids.reserve(PD.rhs.exec_path_ids.size());
+    for (uint64_t hid : PD.rhs.exec_path_ids) {
+        int gid = -1;
+        auto it = PD.h2g.find(hid);
+        if (it != PD.h2g.end()) {
+            gid = it->second;
+        }
+        if (gid >= 0) {
+            prev_exec_gids.push_back(gid);
+        }
+    }
+    bool had_prev_plan = !prev_exec_gids.empty();
+    
     // Extract subgraph around start
-    auto cand = build_subgraph(PD.rhs.start_gid);
+    auto cand = build_subgraph(start_gid); // subgraph gids
     if (cand.empty()) return 0;
 
-    // Remove already-visited from consideration (but keep start)
-    cand.erase(std::remove_if(cand.begin(), cand.end(), [&](int g) {
-        return (g != PD.rhs.start_gid) && (PD.rhs.visited.count(g)>0);
-    }), cand.end());
+    // remove already visisted from consideration (but keep start)
+    auto is_visited_gid = [&](int g) -> bool {
+        if (g == start_gid) return false;
+        if (g < 0 || g >= static_cast<int>(PD.g2h.size())) return true;
+        uint64_t hid = PD.g2h[g];
+        if (hid == 0ull) return true; // invalid / missing handle -> drop from candidates
+        return PD.rhs.visited.count(hid) > 0; // drop if already visited this handle!
+    };
+    cand.erase(std::remove_if(cand.begin(), cand.end(), is_visited_gid), cand.end());
 
     // distances on subgraph
-    std::vector<std::vector<float>> D;
-    std::vector<std::vector<int>> parent;
+    std::vector<std::vector<float>> D; // distances between graph nodes
+    std::vector<std::vector<int>> parent; // gid predecessors from source (cand[i])
     compute_apsp(cand, D, parent);
 
     // greedy orienteering
-    auto order = greedy_orienteering(cand, PD.rhs.start_gid, D);
+    auto order = greedy_orienteering(cand, start_gid, D);
 
     // Score for hysteresis: sum reward - lambda*cost
     float rew = 0.0f;
@@ -166,67 +211,93 @@ bool PathPlanner::rh_plan_tick() {
         rew += node_reward(PD.graph.nodes[order[i]]);
     }
 
+    // subgraph -> global graph mapping
+    std::unordered_map<int,int> loc;
+    loc.reserve(cand.size() * 2);
+    for (int i=0; i<static_cast<int>(cand.size()); ++i) {
+        loc[cand[i]] = i;
+    }
+
+    // Compute path cost
     for (size_t i=0; i+1<order.size(); ++i) {
-        int a = std::find(cand.begin(), cand.end(), order[i]) - cand.begin();
-        int b = std::find(cand.begin(), cand.end(), order[i+1]) - cand.begin();
-        if (a<static_cast<int>(cand.size()) && b<static_cast<int>(cand.size())) {
-            cost += D[a][b];
+        auto ita = loc.find(order[i]);
+        auto itb = loc.find(order[i+1]);
+        if (ita == loc.end() || itb == loc.end()) continue;
+        float dab = D[ita->second][itb->second];
+        if (std::isfinite(dab)) {
+            cost += dab;
         }
     }
 
     float score = rew - cfg_.lambda * cost;
     bool accept = (PD.rhs.last_plan_score < 0.0f) || 
                   (score > PD.rhs.last_plan_score * (1.f + cfg_.hysteresis)) ||
-                  (PD.rhs.exec_path_gids.empty());
+                  !had_prev_plan;
+                  //   (PD.rhs.exec_path_ids.empty());
 
     if (!accept) return 0;
 
-    auto exec = expand_to_graph_path(order, cand, parent);
-    if (exec.empty()) return 0;
+    auto exec_gids = expand_to_graph_path(order, cand, parent);
+    if (exec_gids.empty()) return 0;
 
-    PD.rhs.coarse_order = std::move(order);
-    PD.rhs.exec_path_gids = std::move(exec);
+    PD.rhs.exec_path_ids.clear();
+    PD.rhs.exec_path_ids.reserve(exec_gids.size());
+    for (int g : exec_gids) {
+        uint64_t vptid = PD.g2h[g];
+        if (vptid != 0ull) {
+            PD.rhs.exec_path_ids.push_back(vptid);
+        }
+    }
+
     PD.rhs.last_plan_score = score;
 
     // choose next planning target
-    PD.rhs.next_target_gid = (PD.rhs.exec_path_gids.size() >= 2)
-                             ? PD.rhs.exec_path_gids[1]
-                             : PD.rhs.exec_path_gids.front();
+    PD.rhs.next_target_id = (PD.rhs.exec_path_ids.size() >= 2)
+                             ? PD.rhs.exec_path_ids[1]
+                             : PD.rhs.exec_path_ids.front();
     
     return 1;
 }
 
 bool PathPlanner::set_path(std::vector<Vertex>& gskel) {
     PD.path_out.clear();
-    PD.path_out.reserve(PD.rhs.exec_path_gids.size());
-    // PD.path_out.reserve(PD.rhs.coarse_order.size());
-    int last_gid = -1;
+    PD.path_out.reserve(PD.rhs.exec_path_ids.size());
 
-    for (int gid : PD.rhs.exec_path_gids) {
-    // for (int gid : PD.rhs.coarse_order) {
+    for (uint64_t hid : PD.rhs.exec_path_ids) {
+        auto itG = PD.h2g.find(hid);
+        if (itG == PD.h2g.end()) continue; // viewpoint not present
+        int gid = itG->second;
         if (gid < 0 || gid >= static_cast<int>(PD.graph.nodes.size())) continue;
-        if (gid == last_gid) continue;
-        last_gid = gid;
 
-        const auto& gn = PD.graph.nodes[gid];
+        const GraphNode& gn = PD.graph.nodes[gid];
 
-        // resolve vid -> vertex index
+        // vid -> vertex index in gskel
         auto itV = gskel_vid2idx.find(gn.vid);
         if (itV == gskel_vid2idx.end()) continue;
+        const int vidx = itV->second;
+        if (vidx < 0 || vidx >= static_cast<int>(gskel.size())) continue;
 
-        const int vi = itV->second; // index in gskel corresponding to vid
-
-        if (gn.k >= 0 && gn.k < static_cast<int>(gskel[vi].vpts.size())) {
-            Viewpoint vp = gskel[vi].vpts[gn.k];
-            vp.target_vid = gn.vid;
-            vp.target_vp_pos = gn.k;
-            vp.in_path = true;
-            PD.path_out.push_back(std::move(vp));
-            continue;
+        Vertex& vx = gskel[vidx];
+        int kk = gn.k;
+        if (kk < 0 || kk >= static_cast<int>(vx.vpts.size()) || vx.vpts[kk].vptid != hid) {
+            kk = -1;
+            for (int i=0; i<static_cast<int>(vx.vpts.size()); ++i) {
+                if (vx.vpts[i].vptid == hid) {
+                    kk = i;
+                    break;
+                }
+            }
+            if (kk < 0) continue; // still not found somehow
         }
+
+        Viewpoint vp = vx.vpts[kk];
+        vp.target_vid = gn.vid;
+        vp.target_vp_pos = kk;
+        vp.in_path = true;
+        PD.path_out.push_back(std::move(vp));
     }
 
-    return 1;
+    return !PD.path_out.empty();
 }
 
 /* HELPERS */
@@ -377,6 +448,10 @@ std::vector<int> PathPlanner::greedy_orienteering(const std::vector<int>& cand, 
         loc[cand[i]] = i;
     }
 
+    if (!loc.count(start_gid)) {
+        return {start_gid};
+    }
+
     // initial path is [start]
     std::vector<int> order;
     order.push_back(start_gid);
@@ -455,24 +530,18 @@ std::vector<int> PathPlanner::greedy_orienteering(const std::vector<int>& cand, 
         used += best_dc; 
     }
 
-    two_opt_improve(order, D);
+    two_opt_improve(order, D, loc);
     return order;
 }
 
-void PathPlanner::two_opt_improve(std::vector<int>& order, const std::vector<std::vector<float>>& D) {
+void PathPlanner::two_opt_improve(std::vector<int>& order, const std::vector<std::vector<float>>& D, const std::unordered_map<int,int>& loc) {
     if (order.size() < 4) return;
-    // build local index map each iteration (small M, OK)
 
-    auto loc_of = [&](int gid, const std::vector<int>& cand) {
-        for (int i=0; i<static_cast<int>(cand.size()); ++i) {
-            if (cand[i] == gid) {
-                return i;
-            }
-        }
-        return -1;
+    auto idx = [&](int gid) -> int {
+        auto it = loc.find(gid);
+        return (it == loc.end()) ? -1 : it->second; // index in the APSP cand
     };
 
-    std::vector<int> cand = order;
     bool improved = true;
     while (improved) {
         improved = false;
@@ -482,10 +551,12 @@ void PathPlanner::two_opt_improve(std::vector<int>& order, const std::vector<std
                 int i2 = order[a+1];
                 int j = order[b];
                 int j2 = order[b+1];
-                int li = loc_of(i, cand);
-                int li2 = loc_of(i2, cand);
-                int lj = loc_of(j, cand);
-                int lj2 = loc_of(j2, cand);
+
+                // Mapped to global index
+                int li = idx(i);
+                int li2 = idx(i2);
+                int lj = idx(j);
+                int lj2 = idx(j2);
 
                 if (li<0 || li2<0 || lj<0 || lj2<0) continue;
 
@@ -503,39 +574,85 @@ void PathPlanner::two_opt_improve(std::vector<int>& order, const std::vector<std
 
 std::vector<int> PathPlanner::expand_to_graph_path(const std::vector<int>& order, const std::vector<int>& cand, const std::vector<std::vector<int>>& parent) {
     // cand[i] is gid; Parent[i][g] gives predecessor of g in shortest path from cand[i]
+
+    std::vector<int> exec;
+    if (order.empty()) return exec; // return empty path...
+    
     std::unordered_map<int,int> loc;
     loc.reserve(cand.size() * 2);
     for (int i=0; i<static_cast<int>(cand.size()); ++i) {
         loc[cand[i]] = i;
     }
 
-    std::vector<int> exec;
-    exec.reserve(256);
-    if (order.empty()) return exec;
-    exec.push_back(order.front());
+    auto has_edge = [&](int u, int v) -> bool {
+        for (const auto& e : PD.graph.adj[u]) {
+            if (e.to == v) return true;
+        }
+        return false;
+    };
 
+    auto append_subgraph_path = [&](int src, int dst) -> bool {
+        if (has_edge(src, dst)) {
+            exec.push_back(dst);
+            return true;
+        }
+
+        auto itS = loc.find(src);
+        if (itS == loc.end()) return false;
+        int is = itS->second;
+
+        std::vector<int> rev;
+        int cur = dst;
+        while (cur != -1) {
+            rev.push_back(cur);
+            if (cur == src) break;
+            cur = parent[is][cur]; // predecessor on path from src to cur
+        }
+        if (rev.empty() || rev.back() != src) return false; // unreachable
+
+        for (int i=static_cast<int>(rev.size() - 2); i>=0; --i) {
+            exec.push_back(rev[i]);
+        }
+        return true;
+    };
+
+
+    // Start with first node
+    exec.push_back(order.front());
     for (size_t t=1; t<order.size(); ++t) {
         int src = order[t-1];
         int dst = order[t];
-        int is = loc[src];
-        // int id = loc[dst];
 
-        // reconstruct path src -> dst
-        std::vector<int> rev;
-        rev.reserve(64);
-        int cur = dst;
-        while (cur != -1 && cur != src) {
-            rev.push_back(cur);
-            cur = parent[is][cur];
-        }
+        if (!append_subgraph_path(src, dst)) {
+            // fallback
+            std::vector<float> dist;
+            std::vector<int> par;
+            std::vector<char> allow(PD.graph.nodes.size(), 1); // allow all
+            dijkstra(allow, src, dist, par);
 
-        if (cur == -1) continue; // unreachable 
-
-        // append in forward order, skipping the src duplication
-        for (int i=static_cast<int>(rev.size()-1); i>=0; --i) {
-            exec.push_back(rev[i]);
+            std::vector<int> rev;
+            int cur = dst;
+            while (cur != -1) {
+                rev.push_back(cur);
+                if (cur == src) break;
+                cur = par[cur];
+            }
+            if (rev.empty() || rev.back() != src) {
+                return {}; // give up
+            }
+            for (int i=static_cast<int>(rev.size() - 2); i>=0; --i) {
+                exec.push_back(rev[i]);
+            }
         }
     }
+
+    // final safety
+    for (size_t i=1; i<exec.size(); ++i) {
+        if (!has_edge(exec[i-1], exec[i])) {
+            return {}; // should not happen... forces replan
+        }
+    }
+
     return exec;
 }
 

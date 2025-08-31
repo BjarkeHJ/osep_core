@@ -70,15 +70,12 @@ private:
     
     std::unordered_map<int, uint32_t> per_vertex_seg; // vid -> seq counter
 
-
     /* DATA */
     bool running; 
     ViewpointConfig cfg_;
     std::shared_ptr<pcl::octree::OctreePointCloudSearch<pcl::PointXYZ>> octree_;
     pcl::PointCloud<pcl::PointXYZ>::ConstPtr gmap;
     std::unordered_map<int,int> gskel_vid2idx;
-    
-    // std::vector<int> walk_branch(int start_idx, int nb_idx, const std::vector<char>& allowed, std::unordered_set<std::pair<int,int>, PairHash>& visited_edges);
 };
 
 #endif

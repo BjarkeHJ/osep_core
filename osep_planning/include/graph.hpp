@@ -10,6 +10,7 @@ struct GraphNode {
     int gid; // global graph node id
     int vid; // owning vertex id
     int k; // index in that vertex's vpts
+    uint64_t vptid; // unique persistent viewpoint id
     Eigen::Vector3f p; // position
     float yaw;
     float score;

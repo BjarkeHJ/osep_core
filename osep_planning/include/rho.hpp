@@ -5,12 +5,13 @@
 #include <unordered_set>
 
 struct RHState {
-        int start_gid = -1;
-        std::vector<int> exec_path_gids;  // expanded sequence of gids to execute (graph-connected)
-        std::vector<int> coarse_order;    // chosen viewpoints in order (before expansion)
-        float last_plan_score = -1.0f;
-        int   next_target_gid = -1;
-        std::unordered_set<int> visited;  // viewpoints already visited (or set by caller)
-    };
+    // All ids here are unique viewpoint identifiers packed as 64 bit (vid, vpt counter (unique value for each generated viewpoint))
+    uint64_t start_id = 0; // unique vpt identifier
+    std::vector<uint64_t> exec_path_ids;  // expanded sequence of vptid handles to execute (graph-connected)
+    std::vector<uint64_t> coarse_order_ids;    // chosen viewpoints in order (before expansion)
+    float last_plan_score = -1.0f;
+    uint64_t next_target_id = 0;
+    std::unordered_set<uint64_t> visited;  // viewpoints already visited
+};
 
 #endif

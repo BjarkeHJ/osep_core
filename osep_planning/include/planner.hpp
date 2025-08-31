@@ -28,9 +28,9 @@ struct PlannerConfig {
     float budget = 60.0f;          // max travel cost for this horizon (meters or edge cost units)
     float lambda = 1.0f;           // travel-vs-reward trade-off
     // float subgraph_radius = 40.0f; // BFS radius from current node (cost sum)
-    float subgraph_radius = 400000.0f; // BFS radius from current node (cost sum)
+    float subgraph_radius = 40.0f; // BFS radius from current node (cost sum)
     // int   subgraph_max_nodes = 200;
-    int   subgraph_max_nodes = 2000;
+    int   subgraph_max_nodes = 20;
     float hysteresis = 0.15f;      // replan only if new_score > old*(1+hysteresis)
     int   warm_steps = 1;          // how many first steps to commit before re-planning
 
@@ -48,6 +48,9 @@ struct PlannerData {
     DronePose drone_pose;
     RHState rhs; // Receding horizon state
     std::vector<Viewpoint> path_out;
+
+    std::unordered_map<uint64_t, int> h2g; // Map unique vpt id (handle) to graph node index (this tick) it = h2g.find(vptid) gid = it->second
+    std::vector<uint64_t> g2h; // Map graph node index to unique viewpoint id (handle) g2h[gid] -> vptid
 };
 
 
@@ -89,7 +92,7 @@ private:
     void compute_apsp(const std::vector<int>& cand, std::vector<std::vector<float>>& D, std::vector<std::vector<int>>& parent);
     void dijkstra(const std::vector<char>& allow, int s, std::vector<float>& dist, std::vector<int>& parent);
     std::vector<int> greedy_orienteering(const std::vector<int>& cand, int start_gid, const std::vector<std::vector<float>>& D);
-    void two_opt_improve(std::vector<int>& order, const std::vector<std::vector<float>>& D);
+    void two_opt_improve(std::vector<int>& order, const std::vector<std::vector<float>>& D, const std::unordered_map<int,int>& loc);
     std::vector<int> expand_to_graph_path(const std::vector<int>& order, const std::vector<int>& cand, const std::vector<std::vector<int>>& parent);
     
     inline Eigen::Quaternionf yaw_to_quat(float yaw) { return Eigen::Quaternionf(Eigen::AngleAxisf(yaw, Eigen::Vector3f::UnitZ())); }
