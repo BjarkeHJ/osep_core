@@ -41,8 +41,9 @@ bool PathPlanner::build_graph(std::vector<Vertex>& gskel) {
         for (int k=0; k<static_cast<int>(v.vpts.size()); ++k) {
             const Viewpoint& vp = v.vpts[k];
 
-            // if (vp.invalid) continue;
+            if (vp.invalid) continue;
             if (vp.visited) continue;
+
             GraphNode n;
             n.vptid = vp.vptid; // set unique handle id
             n.gid = static_cast<int>(G.nodes.size());
@@ -765,9 +766,18 @@ bool PathPlanner::mark_visited_in_skeleton(uint64_t hid, std::vector<Vertex>& gs
 /* 
 
 TODO:
+- Actually delte viewpoints (Set invalid = delete / Fine for now)
+- Make LOS a corridor (0.5 safe dist?)
 - Change graph build to geometric and implement edge weigthing bonus for topological graphs (same vertex or adjacent vertex)
-- Incorporate with controller -> run true sim
+- 
+
+- Incorporate with controller -> run true sim (Done!)
+
 - viewpoint manager: delete viewpoints accordingly
 - Tune weightings for the planner (understand it)
+
+- Multi vpt path for better path executing (set k of path - still only commit to 1 between plans)
+
+- color seen voxels in real time? 
 
 */
