@@ -3,6 +3,8 @@ from launch_ros.actions import Node
 
 FRAME_ID = "base_link"
 SAFETY_DISTANCE = 10.0
+INTERPOLATION_DISTANCE = 3.0
+INSPECTION_SPEED = 2.5
 
 TOPIC_NAMES = {
     "VEL_CMD": '/osep/vel_cmd',
@@ -37,7 +39,7 @@ def generate_launch_description():
             output="screen",
             parameters=[
                 {"frame_id": FRAME_ID},
-                {"interpolation_distance": 2.0},
+                {"interpolation_distance": INTERPOLATION_DISTANCE},
                 {"costmap_topic": TOPIC_NAMES["COSTMAP"]},
                 {"viewpoints_topic": TOPIC_NAMES["VIEWPOINTS"]},
                 {"path_topic": TOPIC_NAMES["PATH"]},
