@@ -13,9 +13,11 @@
     do { \
         bool ok = (fn)(); \
         running = ok; \
-        std::cout << (ok ? "[SUCCESS] " : "[FAILED] ") << #fn << std::endl; \
         if (!ok) return false; \
     } while (0)
+
+   /* std::cout << (ok ? "[SUCCESS] " : "[FAILED] ") << #fn << std::endl; \ */
+
 
 struct RosaConfig {
     int max_points;

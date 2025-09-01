@@ -14,7 +14,6 @@ ROS 2 Node: ROSA Point Computation
 class RosaNode : public rclcpp::Node {
 public:
     RosaNode();
-    
 private:
     /* Functions */
     void pcd_callback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr pcd_msg);
@@ -28,7 +27,8 @@ private:
     // SOME ODOMETRY SUBSCRIPTION
 
     /* Params */
-    std::string topic_prefix_;
+    std::string lidar_topic_;
+    std::string rosa_topic_;
     int tick_ms_; 
 
     /* Utils */
@@ -44,7 +44,8 @@ private:
 RosaNode::RosaNode() : Node("RosaNode") {
     /* LAUNCH FILE PARAMETER DECLARATIONS */
     // MISC
-    topic_prefix_ = declare_parameter<std::string>("topic_prefix", "/osep");
+    lidar_topic_ = declare_parameter<std::string>("lidar_topic", "/isaac/lidar/raw/pointcloud");
+    rosa_topic_ = declare_parameter<std::string>("rosa_topic", "/osep/rosa/local_rosa_points"); 
     tick_ms_ = declare_parameter<int>("tick_ms", 200);
     // ROSA
     rosa_cfg.max_points = declare_parameter<int>("rosa_max_points", 1000);
@@ -53,9 +54,9 @@ RosaNode::RosaNode() : Node("RosaNode") {
     rosa_cfg.ne_knn = declare_parameter<int>("rosa_ne_knn", 20);
     rosa_cfg.nb_knn = declare_parameter<int>("rosa_nb_knn", 10);
     rosa_cfg.max_proj_range = declare_parameter<float>("rosa_max_projection_range", 10.0f);
-    rosa_cfg.niter_drosa = declare_parameter<int>("rosa_niter_drosa", 6);
+    rosa_cfg.niter_drosa = declare_parameter<int>("rosa_niter_drosa", 10);
     rosa_cfg.niter_dcrosa = declare_parameter<int>("rosa_niter_dcrosa", 5);
-    rosa_cfg.niter_smooth = declare_parameter<int>("rosa_niter_smooth", 3);
+    rosa_cfg.niter_smooth = declare_parameter<int>("rosa_niter_smooth", 5);
     rosa_cfg.alpha_recenter = declare_parameter<float>("rosa_recenter_alpha", 0.3f);
     rosa_cfg.radius_smooth = declare_parameter<float>("rosa_smooth_radius", 5.0f);
 
@@ -65,14 +66,14 @@ RosaNode::RosaNode() : Node("RosaNode") {
     /* ROS2 */
     auto sub_qos = rclcpp::SensorDataQoS(); 
     sub_qos.keep_last(1);
-    pcd_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>("/isaac/lidar/raw/pointcloud", 
+    pcd_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(lidar_topic_, 
                                                                         sub_qos,
                                                                         std::bind(&RosaNode::pcd_callback,
                                                                         this,
                                                                         std::placeholders::_1));
     
     auto pub_qos = rclcpp::QoS(rclcpp::KeepLast(10));
-    pcd_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/test_pointcloud", pub_qos);
+    pcd_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(rosa_topic_, pub_qos);
                                                                         
     tick_timer_ = create_wall_timer(std::chrono::milliseconds(tick_ms_),
                                     std::bind(&RosaNode::process_tick, this));
@@ -89,16 +90,18 @@ void RosaNode::pcd_callback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr 
 }
 
 void RosaNode::publish_vertices(Eigen::MatrixXf& skelver, const std_msgs::msg::Header& src_header) {
-    if (skelver.rows() == 0) return;
+    // if (skelver.rows() == 0) return;
     skelver_cloud->clear();
-    skelver_cloud->points.reserve(skelver.rows());
     
-    for (int i=0; i<skelver.rows(); ++i) {
-        const float x = skelver(i,0);
-        const float y = skelver(i,1);
-        const float z = skelver(i,2);
-        if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) continue;
-        skelver_cloud->points.emplace_back(x,y,z);        
+    if (skelver.rows() > 0) {
+        skelver_cloud->points.reserve(skelver.rows());
+        for (int i=0; i<skelver.rows(); ++i) {
+            const float x = skelver(i,0);
+            const float y = skelver(i,1);
+            const float z = skelver(i,2);
+            if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) continue;
+            skelver_cloud->points.emplace_back(x,y,z);        
+        }
     }
 
     skelver_cloud->width = skelver_cloud->points.size();
@@ -128,18 +131,15 @@ void RosaNode::process_tick() {
 
     pcl::fromROSMsg(*msg, rosa_->input_cloud());
 
-    std::cout << "stamp: "
-          << msg->header.stamp.sec << "."
-          << std::setw(9) << std::setfill('0') << msg->header.stamp.nanosec
-          << "  frame: " << msg->header.frame_id << std::endl;
-
     if (rosa_->rosa_run()) {
         Eigen::MatrixXf& local_vertices = rosa_->output_vertices();
         publish_vertices(local_vertices, msg->header);
     }
+    else {
+        Eigen::MatrixXf empty(0,3);
+        publish_vertices(empty, msg->header);
+    }
 }
-
-
 
 int main(int argc, char** argv) {
     rclcpp::init(argc, argv);

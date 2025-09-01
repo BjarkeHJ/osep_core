@@ -7,6 +7,7 @@
 #include <chrono>
 #include <algorithm>
 #include <set>
+#include <unordered_set>
 #include <pcl/common/common.h>
 #include <pcl/common/point_tests.h>
 #include <pcl/search/kdtree.h>
@@ -16,9 +17,10 @@
     do { \
         bool ok = (fn)(); \
         running = ok; \
-        std::cout << (ok ? "[SUCCESS] " : "[FAILED] ") << #fn << std::endl; \
         if (!ok) return false; \
     } while (0)
+
+   /* std::cout << (ok ? "[SUCCESS] " : "[FAILED] ") << #fn << std::endl; \ */
 
 struct GSkelConfig {
     float gnd_th;
@@ -67,13 +69,15 @@ struct UnionFind {
     }
 };
 
+
 struct Vertex {
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
-
+    int vid = -1;
+    std::vector<int> nb_ids;
     pcl::PointXYZ position;
     VertexLKF kf;
 
-    int obs_coubt = 0;
+    int obs_count = 0;
     int unconf_check = 0;
     int type = 0;
     int smooth_iters;
@@ -81,8 +85,8 @@ struct Vertex {
     bool frozen = false;
     bool conf_check = false;
     bool marked_for_deletion = false;
-    bool updated = false;
-    bool spawned_viewpoints = false;
+    bool pos_update = false;
+    bool type_update = false;
 };
 
 struct GSkelData {
@@ -93,13 +97,13 @@ struct GSkelData {
     pcl::PointCloud<pcl::PointXYZ>::Ptr global_vers_cloud;
     std::vector<int> new_vers_indxs;
     
-
     std::vector<int> joints;
     std::vector<int> leafs;
     std::vector<std::vector<int>> branches;
     std::vector<std::vector<int>> global_adj;
     std::vector<Edge> edges;
 
+    int next_vid = 0;
     size_t gskel_size;
 };
 
@@ -109,7 +113,8 @@ public:
     explicit GSkel(const GSkelConfig& cfg);
     bool gskel_run();
     pcl::PointCloud<pcl::PointXYZ>& input_vertices() { return *GD.new_cands; }
-    pcl::PointCloud<pcl::PointXYZ>::Ptr& output_gskel() { return GD.global_vers_cloud; }
+    pcl::PointCloud<pcl::PointXYZ>::Ptr& output_cloud() { return GD.global_vers_cloud; }
+    std::vector<Vertex>& output_vertices() { return GD.global_vers; }
 
 private:
     /* Functions */
@@ -119,14 +124,14 @@ private:
     bool vertex_merge();
     bool prune();
     bool smooth_vertex_positions();
-    bool extract_branches();
-
+    bool vid_manager();    
+    
     /* Helper */
+    void build_cloud_from_vertices();
     void graph_decomp();
     void merge_into(int keep, int del);
     bool size_assert();
 
-    /* Params */
     GSkelConfig cfg_;
     bool running;
 
@@ -140,6 +145,8 @@ private:
 
 
 };
+
+
 
 
 #endif // GSKEL_HPP_

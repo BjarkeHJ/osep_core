@@ -1,0 +1,38 @@
+#ifndef TYPES_HPP_
+#define TYPES_HPP_
+
+#include <Eigen/Core>
+#include <pcl/common/common.h>
+
+struct Viewpoint {
+    uint64_t vptid = 0; // unique viewpoint id that persists across ticks (64bit)
+
+    Eigen::Vector3f position;
+    float yaw;
+    Eigen::Quaternionf orientation;
+    
+    int target_vid = -1; // corresponding vertex id
+    int target_vp_pos = -1; // index of corresponding vertex vpts vector
+
+    // float score = 0.0f;
+    float score = 100.0f; // set to zero again later
+    
+    bool updated = false;
+    bool invalid = false;
+    
+    bool in_path = false;
+    bool visited = false;
+};
+
+struct Vertex {
+    int vid = -1;
+    std::vector<int> nb_ids;
+    pcl::PointXYZ position;
+    int type = 0;
+    bool pos_update = false;
+    bool type_update = false;
+
+    std::vector<Viewpoint> vpts; // Vertex viewpoints
+};
+
+#endif

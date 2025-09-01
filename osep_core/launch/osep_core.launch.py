@@ -77,9 +77,9 @@ def generate_launch_description():
             ]
         ),
         Node(
-            package="osep_planning",
-            executable="osep_viewpoint_manager",
-            name="ViewpointNode",
+            package="osep_lidar_map",
+            executable="osep_lidar_map",
+            name="LidarMapNode",
             output="screen",
             parameters=[
                 
