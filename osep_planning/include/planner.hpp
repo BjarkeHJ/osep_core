@@ -22,10 +22,12 @@
 
 
 struct PlannerConfig {
+    float graph_radius;
     float map_voxel_size;
-    
+    float safe_dist;
+
     // RHO params
-    float budget = 60.0f;          // max travel cost for this horizon (meters or edge cost units)
+    float budget = 1000.0f;          // max travel cost for this horizon (meters or edge cost units)
     float lambda = 1.0f;           // travel-vs-reward trade-off
     // float subgraph_radius = 40.0f; // BFS radius from current node (cost sum)
     float subgraph_radius = 40.0f; // BFS radius from current node (cost sum)
@@ -34,8 +36,8 @@ struct PlannerConfig {
     float hysteresis = 0.15f;      // replan only if new_score > old*(1+hysteresis)
     int   warm_steps = 1;          // how many first steps to commit before re-planning
 
-    float geometric_bias = 0.0f;   // optional: add cost penalty for geometric edges
-    float topo_bonus = 0.0f;       // optional: subtract cost on topological edges
+    float geometric_bias = 1.0f;   // optional: add cost penalty for geometric edges
+    float topo_bonus = 10.0f;       // optional: subtract cost on topological edges
 };
 
 struct DronePose {
@@ -78,6 +80,7 @@ public:
     const std::vector<Viewpoint>& current_path() { return PD.path_out; }
 
     bool get_next_target(Viewpoint& out);
+    bool get_next_k_targets(std::vector<Viewpoint>& out_k, int k);
     bool get_start(Viewpoint& out);
     bool notify_reached(std::vector<Vertex>& gskel);
 
@@ -108,8 +111,8 @@ private:
     std::shared_ptr<pcl::octree::OctreePointCloudSearch<pcl::PointXYZ>> octree_;
     std::unordered_map<int,int> gskel_vid2idx;
     
-    pcl::KdTreeFLANN<pcl::PointXYZ> vpt_kdtree; // remove again?
-    pcl::PointCloud<pcl::PointXYZ>::Ptr vpt_cloud; // remove again?
+    pcl::KdTreeFLANN<pcl::PointXYZ> vpt_kdtree;
+    pcl::PointCloud<pcl::PointXYZ>::Ptr vpt_cloud;
     
     
     PlannerConfig cfg_;

@@ -28,6 +28,8 @@ ROS2 Node for Path Planning
 using MsgVertex = osep_skeleton_decomp::msg::Vertex;
 using MsgSkeleton = osep_skeleton_decomp::msg::GlobalSkeleton;
 
+struct PendingTarget {uint64_t id; int vid; int k; };
+
 class PlannerNode : public rclcpp::Node {
 public:
     PlannerNode();
@@ -35,13 +37,16 @@ public:
 private:
     /* Functions */
     void skeleton_callback(MsgSkeleton::ConstSharedPtr msg) {
+        if (!msg) return;
         std::lock_guard<std::mutex> lk(mtx_);
         latest_skel_ = std::move(msg);
     }
     void map_callback(sensor_msgs::msg::PointCloud2::ConstSharedPtr msg) {
+        if (!msg) return;
         std::lock_guard<std::mutex> lk(mtx_);
         latest_map_ = std::move(msg);
     }
+    void adjusted_callback(nav_msgs::msg::Path::ConstSharedPtr msg);
 
     void publish_path();
     void publish_init_path();
@@ -55,21 +60,26 @@ private:
     /* ROS2 */
     rclcpp::Subscription<MsgSkeleton>::SharedPtr skel_sub_;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr map_sub_;
+    rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr adjusted_sub_;
+
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
     // rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr target_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr target_pub_;
 
     std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
     std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
+
     rclcpp::TimerBase::SharedPtr tick_timer_;
     rclcpp::TimerBase::SharedPtr ctl_timer_;
 
     /* Params */
     ViewpointConfig vpman_cfg;
     PlannerConfig planner_cfg;
+
     std::string skeleton_topic_;
     std::string map_topic_;
     std::string target_topic_;
+    std::string adjusted_topic_;
     
     std::string path_topic_; // vis
     std::string viewpoint_topic_; // vis
@@ -81,9 +91,9 @@ private:
     int tick_ms_;
     int ctl_ms_;
     float map_voxel_size_;
+    float safe_dist_;
     float reached_dist_th_;
 
-    
     /* Data */
     MsgSkeleton::ConstSharedPtr latest_skel_;
     sensor_msgs::msg::PointCloud2::ConstSharedPtr latest_map_;
@@ -96,6 +106,8 @@ private:
     bool bootstrap_mode_ = true;
     size_t bootstrap_idx_ = 0;
     std::vector<geometry_msgs::msg::PoseStamped> bootstrap_waypoints_;
+
+    std::vector<PendingTarget> last_pub_;
 
     /* Utils */
     std::mutex mtx_;
@@ -118,14 +130,18 @@ PlannerNode::PlannerNode() : Node("PlannerNode") {
     ctl_ms_ = declare_parameter<int>("control_ms", 50);
     map_voxel_size_ = declare_parameter<float>("map_voxel_size", 1.0f);
     reached_dist_th_ = declare_parameter<float>("reached_dist_th", 1.0f);
+    safe_dist_ = declare_parameter<float>("safe_dist", 12.0f);
 
     // TOPICS
-    skeleton_topic_ = declare_parameter<std::string>("skeleton_topic", "/osep/gskel/global_skeleton_vertices");
     // map_topic_ = declare_parameter<std::string>("map_topic", "/osep/lidar_map/global_map");
-    map_topic_ = declare_parameter<std::string>("map_topic", "/osep/tsdf/static_pointcloud"); // Global map
     // target_topic_ = declare_parameter<std::string>("target_topic", "/osep/planner/target"); // target for vel ctrl
-    target_topic_ = declare_parameter<std::string>("target_topic", "/osep/path"); // target for vel ctrl
-    
+
+    skeleton_topic_ = declare_parameter<std::string>("skeleton_topic", "/osep/gskel/global_skeleton_vertices"); // Global skeleton
+    map_topic_ = declare_parameter<std::string>("map_topic", "/osep/tsdf/static_pointcloud"); // Global map
+    // target_topic_ = declare_parameter<std::string>("target_topic", "/osep/path"); // Target path
+    target_topic_ = declare_parameter<std::string>("target_topic", "/osep/viewpoints"); // Target path
+    adjusted_topic_ = declare_parameter<std::string>("adjusted_topic", "/osep/viewpoints_adjusted"); // Recieved adjustments
+
     path_topic_ = declare_parameter<std::string>("path_topic", "/osep/planner/path"); // vis
     viewpoint_topic_ = declare_parameter<std::string>("viewpoints_topic", "/osep/planner/viewpoints"); // vis
     graph_topic_= declare_parameter<std::string>("graph_topic", "/osep/planner/graph"); // vis
@@ -134,10 +150,17 @@ PlannerNode::PlannerNode() : Node("PlannerNode") {
     global_frame_ = declare_parameter<std::string>("global_frame_id", "odom");
 
     // VIEWPOINTMANAGER
-    vpman_cfg.vpt_safe_dist = declare_parameter<float>("vpt_safe_dist", 12.0f);
+    vpman_cfg.vpt_safe_dist = safe_dist_;
     vpman_cfg.map_voxel_size = map_voxel_size_;
+    vpman_cfg.cam_hfov_rad = 60.0f * M_1_PI / 180.0f;
+    vpman_cfg.cam_vfov_rad = 40.0f * M_1_PI / 180.0f;
+    vpman_cfg.cam_Nx = 40;
+    vpman_cfg.cam_Ny = 30;
+    vpman_cfg.cam_max_range = 20.0f;
 
     // PATHPLANNER
+    planner_cfg.graph_radius = declare_parameter<float>("graph_radius", 15.0f);
+    planner_cfg.safe_dist = safe_dist_;
     planner_cfg.map_voxel_size = map_voxel_size_;
 
     /* OBJECT INITIALIZATION */
@@ -155,14 +178,17 @@ PlannerNode::PlannerNode() : Node("PlannerNode") {
     map_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(map_topic_,
                 sub_qos,
                 std::bind(&PlannerNode::map_callback, this, std::placeholders::_1));
-    
+    adjusted_sub_ = this->create_subscription<nav_msgs::msg::Path>(adjusted_topic_,
+                sub_qos,
+                std::bind(&PlannerNode::adjusted_callback, this, std::placeholders::_1));
+
     auto pub_qos = rclcpp::QoS(rclcpp::KeepLast(5)).reliable();
-    path_pub_ = this->create_publisher<nav_msgs::msg::Path>(path_topic_, pub_qos);
     // target_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(target_topic_, pub_qos);
     target_pub_ = this->create_publisher<nav_msgs::msg::Path>(target_topic_, pub_qos);
 
-    vpt_pub_  = this->create_publisher<geometry_msgs::msg::PoseArray>(viewpoint_topic_, pub_qos);
-    graph_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>(graph_topic_, pub_qos);
+    path_pub_ = this->create_publisher<nav_msgs::msg::Path>(path_topic_, pub_qos); // vis
+    vpt_pub_  = this->create_publisher<geometry_msgs::msg::PoseArray>(viewpoint_topic_, pub_qos); // vis
+    graph_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>(graph_topic_, pub_qos); // vis
 
     tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
@@ -316,8 +342,6 @@ void PlannerNode::publish_path() {
         path.poses.emplace_back(std::move(ps));
     }
 
-    std::cout << "Path Message size: " << path.poses.size() << std::endl;
-
     path_pub_->publish(path);
 }
 
@@ -332,6 +356,55 @@ void PlannerNode::publish_init_path() {
         bs_path.poses.push_back(wp);
     }
     path_pub_->publish(bs_path);
+}
+
+void PlannerNode::adjusted_callback(nav_msgs::msg::Path::ConstSharedPtr msg) {
+    if (!msg || msg->poses.empty()) return;
+
+    const size_t n = std::min(msg->poses.size(), last_pub_.size());
+    if (n == 0) {
+        return;
+    }
+
+    {
+        std::scoped_lock lk(mtx_);
+        for (size_t i=0; i<n; ++i) {
+            const auto& P = msg->poses[i].pose;
+            const auto& tag = last_pub_[i];
+
+            auto it = vid2idx_.find(tag.vid);
+            if (it == vid2idx_.end()) continue;
+
+            Vertex& v = skeleton_[it->second];
+            Viewpoint* vp_ptr = nullptr;
+            if (tag.k >= 0 && tag.k < static_cast<int>(v.vpts.size()) && v.vpts[tag.k].vptid == tag.id) {
+                vp_ptr = &v.vpts[tag.k];
+            }
+            else {
+                for (auto& cand : v.vpts) {
+                    if (cand.vptid == tag.id) {
+                        vp_ptr = &cand;
+                        break;
+                    }
+                }
+            }
+
+            if (!vp_ptr) continue;
+
+            vp_ptr->position = Eigen::Vector3f(P.position.x, P.position.y, P.position.z);
+            Eigen::Quaternionf q(P.orientation.w, P.orientation.x, P.orientation.y, P.orientation.z);
+            q.normalize();
+            vp_ptr->orientation = q;
+            const float ys = 2.0f * (q.w()*q.z() + q.x()*q.y());
+            const float yc = 1.0f - 2.0f * (q.y()*q.y() + q.z()*q.z());
+            vp_ptr->yaw = std::atan2(ys, yc);
+            vp_ptr->updated = true;
+
+            if (msg->poses[i].header.frame_id.empty()) {
+                vp_ptr->invalid = true;
+            }
+        }
+    }
 }
 
 void PlannerNode::update_skeleton(const std::vector<Vertex>& skel_in) { 
@@ -412,6 +485,7 @@ std::optional<geometry_msgs::msg::PoseStamped> PlannerNode::get_drone_pose(const
 }
 
 void PlannerNode::process_tick() {
+    
     MsgSkeleton::ConstSharedPtr skel_msg;
     sensor_msgs::msg::PointCloud2::ConstSharedPtr map_msg;
     {
@@ -421,10 +495,10 @@ void PlannerNode::process_tick() {
         latest_skel_.reset();
         latest_map_.reset();
     }   
-
+    
     if (!skel_msg || !map_msg) return;
     current_header = skel_msg->header;
-
+    
     // Set current map (node-owned) - Temp swap to avoid member realloc
     {
         pcl::PointCloud<pcl::PointXYZ> tmp;
@@ -446,11 +520,11 @@ void PlannerNode::process_tick() {
         maxpt.x() + pad, maxpt.y() + pad, maxpt.z() + pad
     );
     map_octree_->addPointsFromInputCloud();
-
+    
     // Pass map cloud and map octree
     vpman_->set_map(map_cloud_, map_octree_);
     planner_->set_map(map_cloud_, map_octree_);
-
+    
     // Fill from skeleton message...
     std::vector<Vertex> skel_inc;
     skel_inc.reserve(skel_msg->vertices.size());
@@ -474,6 +548,7 @@ void PlannerNode::process_tick() {
     // Updates vid2idx_ too
     update_skeleton(skel_inc);
 
+    if (bootstrap_mode_) return;
 
     vpman_->set_vid2idx(vid2idx_); // Store current vid mapping in vpman_
     if (vpman_->update_viewpoints(skeleton_)) {
@@ -526,7 +601,10 @@ void PlannerNode::control_tick() {
 
         if (bootstrap_mode_ && bootstrap_idx_ < bootstrap_waypoints_.size()) {
             nav_msgs::msg::Path tgt_msg;
-            tgt_msg.header = current_header;
+            tgt_msg.header.frame_id = global_frame_;
+            bootstrap_waypoints_[bootstrap_idx_].header.frame_id = global_frame_;
+            bootstrap_waypoints_[bootstrap_idx_].header.stamp = this->get_clock()->now(); 
+            tgt_msg.header.stamp = this->get_clock()->now();
             tgt_msg.poses.push_back(bootstrap_waypoints_[bootstrap_idx_]);
             target_pub_->publish(tgt_msg);
         }
@@ -534,73 +612,64 @@ void PlannerNode::control_tick() {
     }
 
 
-    const float pass_xt = 2.0f * reached_dist_th_;
-    const int max_consume = 1;
-
-    float dist_to_tgt;
-
-    for (int iter=0; iter<max_consume; ++iter) {
-        Viewpoint tgt, anch;
-        {
-            std::scoped_lock lk(planner_api_mtx_);
-            if (!planner_->get_next_target(tgt)) {
-                std::cout << "Could not get next target!" << std::endl;
-                break;
-            }
-            if (!planner_->get_start(anch)) {
-                if ( (tgt.position - drone_pos).norm() <= reached_dist_th_ ) {
-                    planner_->notify_reached(skeleton_);
-                }
-                else break;
-                continue;
-            }
-        }
-
-        dist_to_tgt = (tgt.position - drone_pos).norm();
-        std::cout << "Distance to target: " << dist_to_tgt << std::endl;
-        bool reached = dist_to_tgt <= reached_dist_th_;
-        bool passed = false;
-        {
-            Eigen::Vector3f a = anch.position;
-            Eigen::Vector3f b = tgt.position;
-            Eigen::Vector3f ab = b-a;
-            float L2 = ab.squaredNorm();
-            if (L2 > 1e-6f) {
-                Eigen::Vector3f ap = drone_pos - a;
-                float t = ap.dot(ab) / L2;
-                Eigen::Vector3f xtrack = ap - t*ab;
-                float d_xt = xtrack.norm();
-                passed = (t >= 1.0f) && (d_xt <= pass_xt);
-            }
-        }
-
-        if (!(reached || passed)) break;
-    
-        {
-            std::scoped_lock lk(planner_api_mtx_);
-            planner_->notify_reached(skeleton_);
-        }
-    }
-
-    Viewpoint tgt;
+    // track reached viewpoints 
+    Viewpoint current;
+    bool have_current = false;
     {
         std::scoped_lock lk(planner_api_mtx_);
-        if (!planner_->get_next_target(tgt)) return;
+        have_current = planner_->get_next_target(current);
     }
 
-    nav_msgs::msg::Path tgt_msg;
-    tgt_msg.header = current_header;
-    geometry_msgs::msg::PoseStamped pose_msg;
-    pose_msg.header = current_header;
-    pose_msg.pose.position.x = tgt.position.x();
-    pose_msg.pose.position.y = tgt.position.y();
-    pose_msg.pose.position.z = tgt.position.z();
-    pose_msg.pose.orientation.x = tgt.orientation.x();
-    pose_msg.pose.orientation.y = tgt.orientation.y();
-    pose_msg.pose.orientation.z = tgt.orientation.z();
-    pose_msg.pose.orientation.w = tgt.orientation.w();
-    tgt_msg.poses.push_back(pose_msg);
-    target_pub_->publish(tgt_msg);
+    if (have_current) {
+        const float dist_to_current = (current.position - drone_pos).norm();
+        if (dist_to_current <= reached_dist_th_) {
+            {
+                std::scoped_lock lk(planner_api_mtx_);
+                planner_->notify_reached(skeleton_);
+                RCLCPP_INFO(get_logger(), "Reached target - Advancing!");
+                vpman_->commit_coverage(current);
+            }
+        }
+    }
+    
+    int k = 3;
+    std::vector<Viewpoint> targets;
+
+    {
+        std::scoped_lock lk(planner_api_mtx_);
+        if (!planner_->get_next_k_targets(targets, k)) {
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "Could not get path - Exiting!");
+            return;
+        }
+    }
+
+    k = static_cast<int>(targets.size()); // size may have changed if not k current targets
+    nav_msgs::msg::Path targets_msg;
+    targets_msg.header.frame_id = global_frame_;
+    targets_msg.header.stamp = this->get_clock()->now();
+
+    last_pub_.clear();
+    last_pub_.reserve(k);
+    for (int i=0; i<k; ++i) {
+        const Viewpoint& target = targets[i];
+        last_pub_.push_back( {target.vptid, target.target_vid, target.target_vp_pos} );
+        
+        geometry_msgs::msg::PoseStamped pose_msg;
+        // pose_msg.header = current_header;s
+        pose_msg.header.frame_id = global_frame_;
+        pose_msg.header.stamp = this->get_clock()->now();
+        pose_msg.pose.position.x = target.position.x();
+        pose_msg.pose.position.y = target.position.y();
+        pose_msg.pose.position.z = target.position.z();
+        pose_msg.pose.orientation.x = target.orientation.x();
+        pose_msg.pose.orientation.y = target.orientation.y();
+        pose_msg.pose.orientation.z = target.orientation.z();
+        pose_msg.pose.orientation.w = target.orientation.w();
+        targets_msg.poses.push_back(pose_msg);
+    }
+
+    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000, "Published path lenght: %zu", targets_msg.poses.size());
+    target_pub_->publish(targets_msg);
 }
 
 int main(int argc, char** argv) {

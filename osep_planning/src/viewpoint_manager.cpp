@@ -10,6 +10,10 @@ TODO: Incorporate 2d_local_costmap into the viewpoint sampling process.
 
 ViewpointManager::ViewpointManager(const ViewpointConfig& cfg) : cfg_(cfg) {
     gmap.reset(new pcl::PointCloud<pcl::PointXYZ>);
+
+    cov_.voxel_size = cfg_.map_voxel_size;
+    build_rayset(cfg_.cam_hfov_rad, cfg_.cam_vfov_rad, cfg_.cam_Nx, cfg_.cam_Ny, cfg_.cam_max_range); // build set for ray casting
+
     running = 1;
 }
 
@@ -17,6 +21,15 @@ bool ViewpointManager::update_viewpoints(std::vector<Vertex>& gskel) {
     /* Main public function */
     running = sample_viewpoints(gskel);
     running = filter_viewpoints(gskel);
+
+    auto t_start = std::chrono::high_resolution_clock::now();
+
+    running = score_viewpoints(gskel);
+
+    auto t_end = std::chrono::high_resolution_clock::now();
+    auto t_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(t_end-t_start).count();
+    // std::cout << "[Viewpoint Scoring] Time Elapsed: " << t_elapsed << " ms" << std::endl;
+
     return running;
 }
 
@@ -37,7 +50,7 @@ bool ViewpointManager::sample_viewpoints(std::vector<Vertex>& gskel) {
 }
 
 bool ViewpointManager::filter_viewpoints(std::vector<Vertex>& gskel) {
-    const int MAX_ATTEMPTS = 10;
+    const int MAX_ATTEMPTS = 5;
     for (Vertex& v : gskel) {
         for (Viewpoint& vp : v.vpts) {
             if (is_not_safe_dist(vp.position)) {
@@ -58,6 +71,31 @@ bool ViewpointManager::filter_viewpoints(std::vector<Vertex>& gskel) {
                     continue;
                 }
             }
+        }
+    }
+
+    return 1;
+}
+
+bool ViewpointManager::score_viewpoints(std::vector<Vertex>& gskel) {
+    if (gskel.empty()) return 0;
+
+    for (Vertex& v : gskel) {
+        for (Viewpoint& vp : v.vpts) {
+            if (vp.visited) continue;
+            if (vp.invalid) {
+                vp.score = -1e9f;
+                continue;
+            }
+
+            GainStats gs = estimate_viewpoint_coverage(vp);
+            if (gs.new_surface == 0) {
+                vp.score = 0.0f;
+            }
+            else {
+                vp.score = gs.new_surface - (0.5f * gs.overlap_surface);
+            }
+            // std::cout << "Viewpoint Score: " << vp.score << std::endl;
         }
     }
 
@@ -198,7 +236,6 @@ float ViewpointManager::distance_to_free_space(const Eigen::Vector3f& p_in, cons
     float n = dir.norm();
     // if (n < EPS) return -1.0f;
     if (n < EPS) {
-        std::cout << "Returned due to small norm!" << std::endl; 
         return -1.0f;
     }
     dir /= n;
@@ -249,7 +286,100 @@ float ViewpointManager::distance_to_free_space(const Eigen::Vector3f& p_in, cons
     return -1.0f;
 }
 
+void ViewpointManager::build_rayset(float hfov_rad, float vfov_rad, int Nx, int Ny, float maxR) {
+    /* Build simulated camera resolution set */
+    rayset_.rays_cam.clear();
+    rayset_.max_range = maxR;
+    rayset_.rays_cam.reserve(Nx*Ny);
+    for (int y=0; y<Ny; ++y) {
+        float v = ( (y + 0.5f) / Ny - 0.5f )* vfov_rad;
+        for (int x=0; x<Nx; ++x) {
+            float u = ( (x + 0.5f) / Nx - 0.5f) * hfov_rad;
+            Eigen::Vector3f d(1.0f, std::tan(u), std::tan(v));
+            d.normalize();
+            rayset_.rays_cam.push_back(d);
+        }
+    }
+}
 
+bool ViewpointManager::is_occ_voxel(const Eigen::Vector3f& p) {
+    std::vector<int> idx;
+    pcl::PointXYZ q(p.x(), p.y(), p.z());
+    octree_->voxelSearch(q, idx);
+    return !idx.empty();
+}
+
+GainStats ViewpointManager::estimate_viewpoint_coverage(const Viewpoint& vp) {
+    const float S = octree_->getResolution();
+    const Eigen::Vector3f cam_o = vp.position; // camera origin
+    const Eigen::Quaternionf q = vp.orientation; // camera orientation
+    const Eigen::Matrix3f R = q.toRotationMatrix();
+
+    GainStats gs{0,0};
+
+    for (const auto& ray : rayset_.rays_cam) {
+        Eigen::Vector3f r = R * ray; // transform to world
+        float t = S * 0.5f;
+        bool hit = false;
+        while (t <= rayset_.max_range) {
+            Eigen::Vector3f p = cam_o + t * r;
+            if (is_occ_voxel(p)) {
+                uint64_t key = grid_key(p, S);
+                if (cov_.seen.find(key) == cov_.seen.end()) {
+                    gs.new_surface++;
+                }
+                else {
+                    gs.overlap_surface++;
+                }
+                hit = true;
+                break;
+            }
+            t += S;
+        }
+
+        if (!hit) continue;
+    }
+    return gs;
+}
+
+void ViewpointManager::commit_coverage(const Viewpoint& vp) {
+    const float S = octree_->getResolution();
+    const Eigen::Vector3f cam_o = vp.position;
+    const Eigen::Matrix3f R = vp.orientation.toRotationMatrix();
+
+    int new_count = 0;
+    for (const auto& ray : rayset_.rays_cam) {
+        Eigen::Vector3f r = R * ray;
+        float t = S * 0.5f;
+        while (t <= rayset_.max_range) {
+            Eigen::Vector3f p = cam_o + t * r;
+            if (!is_occ_voxel(p)) {
+                cov_.seen.insert(grid_key(p,S));
+                new_count++;
+                break;
+            }
+            t += S;
+        }
+    }
+    std::cout << "Reached viewpoint covered: " << new_count << " new voxels." << std::endl;
+}
+
+
+/* 
+
+TODO:
+- Viewpoint Scoring based
+    - Voxel novelty (viewpoint overlap instead of voxel count?)
+
+- Prune viewpoints? 
+
+- More viewpoints? Always circle around branch vertex -> prune roll/pitch neq ~0?
+
+- Vertex visitation (no more viewpoints...?)
+
+
+
+*/
 
 
 

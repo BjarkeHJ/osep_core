@@ -21,14 +21,12 @@ bool PathPlanner::plan(std::vector<Vertex>& gskel) {
     running = rh_plan_tick();
     running = set_path(gskel);
 
-    std::cout << "Planned Path - Path Lenght: " << PD.path_out.size() << std::endl;
+    // std::cout << "Planned Path - Path Lenght: " << PD.path_out.size() << std::endl;
 
     return running;
 }
 
 bool PathPlanner::build_graph(std::vector<Vertex>& gskel) {
-    /* CHANGE THIS TO MY ORIGINAL WORK AND CLASSIFY EDGES BASED ON VERTEX ADJACENCY */
-
     PD.graph.nodes.clear();
     PD.graph.adj.clear();
     Graph G;
@@ -36,7 +34,7 @@ bool PathPlanner::build_graph(std::vector<Vertex>& gskel) {
     std::unordered_map<int, std::vector<int>> vids_to_gid;
     vids_to_gid.reserve(gskel.size() * 2);
     
-    // Create nodes
+    // Create nodes for each valid viewpoint!
     for (const Vertex& v : gskel) {
         for (int k=0; k<static_cast<int>(v.vpts.size()); ++k) {
             const Viewpoint& vp = v.vpts[k];
@@ -62,64 +60,81 @@ bool PathPlanner::build_graph(std::vector<Vertex>& gskel) {
         PD.graph = std::move(G);
         return 0;
     }
-    
-    std::unordered_set<uint64_t> edge_set;
+
+    // Geometric adjacency with Gabriel testing and Corridor collision check
+    vpt_cloud->points.clear();
+    vpt_cloud->resize(G.nodes.size());
+    for (size_t i=0; i<G.nodes.size(); ++i) {
+        vpt_cloud->points[i].x = G.nodes[i].p.x();
+        vpt_cloud->points[i].y = G.nodes[i].p.y();
+        vpt_cloud->points[i].z = G.nodes[i].p.z();
+    }
+    vpt_kdtree.setInputCloud(vpt_cloud);
+
+    std::unordered_set<uint64_t> edge_set; // will contain the set of undirected edges in the graph
     edge_set.reserve(G.nodes.size() * 4);
-    for (const auto& u : gskel) {
-        auto itU = vids_to_gid.find(u.vid);
-        if (itU == vids_to_gid.end() || itU->second.empty()) continue;
+
+    std::vector<int> ids;
+    std::vector<float> d2s;
+    ids.reserve(32);
+    d2s.reserve(32);
+
+    for (int u=0; u < static_cast<int>(G.nodes.size()); ++u) {
+        const auto& np = vpt_cloud->points[u];
         
-        if (u.type == 1) {
-            // connect in order
-            const auto& gids = itU->second;
-            const int m = static_cast<int>(gids.size());
-            if (m < 2) continue;
+        ids.clear();
+        d2s.clear();
+        int found = vpt_kdtree.radiusSearch(np, cfg_.graph_radius, ids, d2s);
+        if (found <= 1) continue; //radiusSearch include np itself
 
-            for (int i=0; i+1<m; ++i) {
-                int g0 = gids[i];
-                int g1 = gids[i+1];
-                const auto& p0 = G.nodes[g0].p;
-                const auto& p1 = G.nodes[g1].p;
-                const float dd2 = d2(p0, p1);
-                if (line_of_sight(p0, p1)) {
-                    const float w = std::sqrt(dd2);
-                    add_edge(G, g0, g1, w, edge_set, true); // add topological graph
-                }
-            }
-            continue;
+        struct Cand { int v; float d2; };
+        std::vector<Cand> cands;
+        cands.reserve(found - 1);
+        for (int j=0; j<found; ++j) {
+            const int v = ids[j];
+            if (v == u || v < u) continue; // undirected edges
+            cands.push_back( {v, d2s[j] } );
         }
-        else {
-            for (int nb_vid : u.nb_ids) {
-                auto itnb = gskel_vid2idx.find(nb_vid);
-                if (itnb == gskel_vid2idx.end()) continue;
-                const int nb_idx = itnb->second;
-                const auto& v = gskel[nb_idx];
-                auto itV = vids_to_gid.find(v.vid);
-                if (itV == vids_to_gid.end() || itV->second.empty()) continue;
+        
+        // std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b){ return a.d2 < b.d2; });
+        
+        // Find vertex of viewpoint u
+        int uvid = G.nodes[u].vid;
+        auto itU = gskel_vid2idx.find(uvid);
+        if (itU == gskel_vid2idx.end()) continue;
+        int idx = itU->second;
+        const Vertex& gu = gskel[idx];
+        const Eigen::Vector3f& p1 = np.getVector3fMap();
 
-                const auto& u_gids = itU->second;
-                const auto& v_gids = itV->second;
+        for (const auto& c : cands) {
+            const int j = c.v;
+            const Eigen::Vector3f& p2 = vpt_cloud->points[j].getVector3fMap();
+            if (!line_of_sight(p1, p2)) continue;
+            
+            // gabriel graph test
+            Eigen::Vector3f mid = 0.5 * (p1 + p2);
+            const float r2 = c.d2 * 0.25; // (d/2)² 
+            bool keep_edge = true;
 
-                for (int gu : u_gids) {
-                    const auto& pu = G.nodes[gu].p;
-                    int best_gv = -1;
-                    float best_d2 = std::numeric_limits<float>::infinity();
-
-                    for (int gv : v_gids) {
-                        const auto& pv = G.nodes[gv].p;
-                        float dd2 = d2(pu, pv);
-                        if (dd2 < best_d2 && line_of_sight(pu, pv)) {
-                            best_d2 = dd2;
-                            best_gv = gv;
-                        }
-                    }
-
-                    if (best_gv >= 0) {
-                        const float w = std::sqrt(best_d2);
-                        add_edge(G, gu, best_gv, w, edge_set, true); // add topological graph
-                    }
+            for (int kk=0; kk<found; ++kk) {
+                int k = ids[kk];
+                if (k == u || k == j) continue;
+                const Eigen::Vector3f& p3 = G.nodes[k].p;
+                if ( (p3 - mid).squaredNorm() < r2) {
+                    keep_edge = false;
+                    break;
                 }
             }
+
+            if (!keep_edge) continue;
+
+            const auto& vvid = G.nodes[j].vid;
+            const bool topo = (uvid == vvid || std::find(gu.nb_ids.begin(), gu.nb_ids.end(), vvid) != gu.nb_ids.end());
+
+            // if (!topo) continue; // only topological graph edges
+
+            float w = std::sqrt(c.d2);
+            add_edge(G, u, c.v, w, edge_set, topo);
         }
     }
 
@@ -183,7 +198,7 @@ bool PathPlanner::rh_plan_tick() {
         }
     }
     bool had_prev_plan = !prev_exec_gids.empty();
-    had_prev_plan = false;
+    // had_prev_plan = false;
     
     // Extract subgraph around start
     auto cand = build_subgraph(start_gid); // subgraph gids
@@ -309,6 +324,7 @@ bool PathPlanner::set_path(std::vector<Vertex>& gskel) {
 
 /* HELPERS */
 bool PathPlanner::line_of_sight(const Eigen::Vector3f& a, const Eigen::Vector3f& b) {
+    /* Corridor check */
     if (!octree_) {
         return 0; // nothing to do...
     }
@@ -318,17 +334,56 @@ bool PathPlanner::line_of_sight(const Eigen::Vector3f& a, const Eigen::Vector3f&
     if (L <= 1e-6f) return 1;
     Eigen::Vector3f u = d / L;
 
-    pcl::octree::OctreePointCloudSearch<pcl::PointXYZ>::AlignedPointTVector centers;
-    octree_->getIntersectedVoxelCenters(a, u, centers);
+    // pcl::octree::OctreePointCloudSearch<pcl::PointXYZ>::AlignedPointTVector centers;
+    // octree_->getIntersectedVoxelCenters(a, u, centers);
 
-    const float tol = 0.6f * cfg_.map_voxel_size;
-    const float tol2 = tol * tol;
-    for (const auto& c : centers) {
-        Eigen::Vector3f cv = c.getVector3fMap();
-        if ((cv - a).squaredNorm() <= tol2) continue;
-        if ((cv - b).squaredNorm() <= tol2) continue;
-        return 0;
-    }
+    // const float tol = 0.6f * cfg_.map_voxel_size;
+    // const float tol2 = tol * tol;
+    // for (const auto& c : centers) {
+    //     Eigen::Vector3f cv = c.getVector3fMap();
+    //     if ((cv - a).squaredNorm() <= tol2) continue;
+    //     if ((cv - b).squaredNorm() <= tol2) continue;
+    //     return 0;
+    // }
+
+    // build local frame
+    Eigen::Vector3f tmp = (std::abs(u.z()) < 0.9f) ? Eigen::Vector3f::UnitZ() : Eigen::Vector3f::UnitY();
+    Eigen::Vector3f n1 = (tmp.cross(u)).normalized(); // Local Y
+    Eigen::Vector3f n2 = (u.cross(n1)).normalized(); // local Z
+
+    const float hx = 0.5f * L;
+    const float hy = 0.25f * cfg_.safe_dist;
+    const float hz = hy;
+
+    Eigen::Matrix3f R;
+    R.col(0) = u;
+    R.col(1) = n1;
+    R.col(2) = n2;
+    Eigen::Vector3f half_ext = Eigen::Vector3f(hx, hy, hz);
+    Eigen::Vector3f aabb_half = (R.cwiseAbs2() * half_ext).eval();
+
+    Eigen::Vector3f center = 0.5f * (a + b);
+    Eigen::Vector3f bbmin = center - aabb_half;
+    Eigen::Vector3f bbmax = center + aabb_half;
+
+    // Slight inflation
+    const float vx = cfg_.map_voxel_size;
+    bbmin.array() -= 0.5f * vx;
+    bbmax.array() += 0.5f * vx;
+
+    std::vector<int> ids;
+    octree_->boxSearch(bbmin, bbmax, ids);
+
+    const auto& cloud = octree_->getInputCloud();
+    for (int idx : ids) {
+        const auto& c = cloud->points[idx];
+        Eigen::Vector3f p(c.x, c.y, c.z);
+        Eigen::Vector3f pl = R.transpose() * (p - center);
+
+        if (std::abs(pl.x()) <= hx && std::abs(pl.y()) <= hy && std::abs(pl.z()) <= hz) {
+            return 0;
+        }
+    }   
     return 1;
 }
 
@@ -671,6 +726,35 @@ bool PathPlanner::get_next_target(Viewpoint& out) {
     return true;
 }
 
+bool PathPlanner::get_next_k_targets(std::vector<Viewpoint>& out_k, int k) {
+    if (PD.rhs.exec_path_ids.empty()) return false;
+
+    // try to get k targets
+    if (k > static_cast<int>(PD.rhs.exec_path_ids.size())) {
+        k = static_cast<int>(PD.rhs.exec_path_ids.size());
+    }
+
+    out_k.resize(k); // size the vector correctly
+
+    for (int i=0; i<k; ++i) {
+        const uint64_t& id = PD.rhs.exec_path_ids[i];
+        auto it = PD.h2g.find(id);
+        if (it == PD.h2g.end()) return false;
+        int g = it->second;
+        if (g < 0 || g >= static_cast<int>(PD.graph.nodes.size())) return false;
+
+        const GraphNode& gn = PD.graph.nodes[g];
+        out_k[i].position = gn.p;
+        out_k[i].yaw = gn.yaw;
+        out_k[i].orientation = yaw_to_quat(gn.yaw);
+        out_k[i].target_vid = gn.vid;
+        out_k[i].target_vp_pos = gn.k;
+        out_k[i].vptid = gn.vptid;
+        out_k[i].in_path = true;
+    }
+    return true;
+}
+
 bool PathPlanner::get_start(Viewpoint& out) {
     if (PD.rhs.start_id == 0ull) return false;
     auto it = PD.h2g.find(PD.rhs.start_id);
@@ -695,23 +779,20 @@ bool PathPlanner::notify_reached(std::vector<Vertex>& gskel) {
     PD.rhs.visited.insert(PD.rhs.next_target_id);
     PD.rhs.start_id = PD.rhs.next_target_id;
 
-
-    uint64_t new_next = 0ull;
-    bool past_anchor = false;
-    for (uint64_t h : PD.rhs.exec_path_ids) {
-        if (!past_anchor) {
-            if (h == PD.rhs.start_id) {
-                past_anchor = true;
-                continue;
-            }
-        }
-        if (!h) continue;
-        if (PD.rhs.visited.count(h) == 0) {
-            new_next = h;
-            break;
-        }
+    // Erase prefix up to (and including) the reached handle
+    auto it = std::find(PD.rhs.exec_path_ids.begin(), PD.rhs.exec_path_ids.end(), PD.rhs.start_id);
+    if (it != PD.rhs.exec_path_ids.end()) {
+        PD.rhs.exec_path_ids.erase(PD.rhs.exec_path_ids.begin(), std::next(it));
     }
-    PD.rhs.next_target_id = new_next;
+
+    // Drop any stale/visisted handles
+    PD.rhs.exec_path_ids.erase(
+        std::remove_if(PD.rhs.exec_path_ids.begin(), PD.rhs.exec_path_ids.end(),
+                       [&](uint64_t h){ return PD.rhs.visited.count(h) || !PD.h2g.count(h); }),
+        PD.rhs.exec_path_ids.end());
+    
+    PD.rhs.next_target_id = PD.rhs.exec_path_ids.empty() ? 0ull : PD.rhs.exec_path_ids.front();
+
     return true;
 }
 
@@ -760,24 +841,26 @@ bool PathPlanner::mark_visited_in_skeleton(uint64_t hid, std::vector<Vertex>& gs
 }
 
 
-
-
-
+s
 /* 
 
 TODO:
-- Actually delte viewpoints (Set invalid = delete / Fine for now)
-- Make LOS a corridor (0.5 safe dist?)
-- Change graph build to geometric and implement edge weigthing bonus for topological graphs (same vertex or adjacent vertex)
-- 
-
+- Actually delte viewpoints (Treats invalid = delete / Fine for now)
+- Make LOS a corridor (0.5 safe dist?) (Done)
 - Incorporate with controller -> run true sim (Done!)
+- Multi vpt path for better path executing (set k of path - still only commit to 1 between plans) (Done)
 
-- viewpoint manager: delete viewpoints accordingly
+- In exec path: Optimize path order for minimum uturns etc (start at closest to drone -> visit all)
+
+- Implement adjusted viewpoint 
+
+- Implement edge weigthing bonus for topological graphs (same vertex or adjacent vertex)
+
 - Tune weightings for the planner (understand it)
-
-- Multi vpt path for better path executing (set k of path - still only commit to 1 between plans)
 
 - color seen voxels in real time? 
 
+- End-of-Mission Criteria: No more valid viewpoints with sufficient score! -> Return to start?
+
 */
+
