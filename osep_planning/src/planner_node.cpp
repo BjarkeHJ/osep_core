@@ -252,10 +252,22 @@ void PlannerNode::publish_viewpoints() {
 }
 
 void PlannerNode::publish_graph() {
-    std::lock_guard<std::mutex> lk(state_mtx_);
-
     if (!planner_) return;
-    const Graph& g = planner_->get_graph();
+
+    // copy header under state lock
+    std_msgs::msg::Header hdr;
+    {
+        std::lock_guard<std::mutex> lk(state_mtx_);
+        hdr = current_header;
+    }
+
+    // read graph under planner lock
+    Graph g;
+    {
+        std::lock_guard<std::mutex> lk(planner_mtx_);
+        g = planner_->get_graph();
+    }
+
     const int N = g.nodes.size();
     if (N == 0 || static_cast<int>(g.adj.size()) != N) return;
 
@@ -263,7 +275,7 @@ void PlannerNode::publish_graph() {
     // Clear previous markers
     {
         visualization_msgs::msg::Marker clr;
-        clr.header = current_header;
+        clr.header = hdr;
         clr.ns = "graph";
         clr.id = 0;
         clr.action = visualization_msgs::msg::Marker::DELETEALL;
@@ -290,7 +302,7 @@ void PlannerNode::publish_graph() {
     // ---------- Edges (LINE_LIST) ----------
     {
         visualization_msgs::msg::Marker m;
-        m.header = current_header;
+        m.header = hdr;
         m.ns = "graph_edges";
         m.id = 2;
         m.type = visualization_msgs::msg::Marker::LINE_LIST;
@@ -334,13 +346,26 @@ void PlannerNode::publish_graph() {
 }
 
 void PlannerNode::publish_path() {
-    const auto& path_vpts = planner_->current_path();
+
+    std_msgs::msg::Header hdr;
+    {
+        std::lock_guard<std::mutex> lk(state_mtx_);
+        hdr = current_header;
+    }
+
+    std::vector<Viewpoint> path_vpts;
+    {
+        std::lock_guard<std::mutex> lk(planner_mtx_);
+        path_vpts = planner_->current_path();
+    }
+
+    // const auto& path_vpts = planner_->current_path();
     nav_msgs::msg::Path path; 
-    path.header = current_header;
+    path.header = hdr;
     path.poses.reserve(path_vpts.size());
     for (const auto& vp : path_vpts) {
         geometry_msgs::msg::PoseStamped ps;
-        ps.header = path.header;
+        ps.header = hdr;
         ps.pose.position.x = vp.position.x();
         ps.pose.position.y = vp.position.y();
         ps.pose.position.z = vp.position.z();
@@ -584,83 +609,11 @@ void PlannerNode::process_tick() {
         drone_ori.z() = pose_opt->pose.orientation.z;
         planner_->set_drone_pose(drone_pos, drone_ori);
 
-        if (!bootstrap_idx_ && planner_->plan(skeleton_)) {
+        if (!bootstrap_mode_ && planner_->plan(skeleton_)) {
             // const auto& path = planner_->current_path();
             publish_path();
-
         }
-    
     }
-
-    // // Set current map (node-owned) - Temp swap to avoid member realloc
-    // {
-    //     pcl::PointCloud<pcl::PointXYZ> tmp;
-    //     pcl::fromROSMsg(*map_msg, tmp);
-    //     {
-    //         std::scoped_lock lk(mtx_);
-    //         map_cloud_->swap(tmp);
-    //     }
-    // }
-
-    // // Update octree 
-    // Eigen::Vector4f minpt, maxpt;
-    // pcl::getMinMax3D(*map_cloud_, minpt, maxpt);
-    // const float pad = 10.0f * map_voxel_size_;
-    // map_octree_->deleteTree();
-    // map_octree_->setInputCloud(map_cloud_);
-    // map_octree_->defineBoundingBox(
-    //     minpt.x() - pad, minpt.y() - pad, minpt.z() - pad,
-    //     maxpt.x() + pad, maxpt.y() + pad, maxpt.z() + pad
-    // );
-    // map_octree_->addPointsFromInputCloud();
-    
-    // // Pass map cloud and map octree
-    // vpman_->set_map(map_cloud_, map_octree_);
-    // planner_->set_map(map_cloud_, map_octree_);
-    
-    // // Fill from skeleton message...
-    // std::vector<Vertex> skel_inc;
-    // skel_inc.reserve(skel_msg->vertices.size());
-    // for (const auto& mv : skel_msg->vertices) {
-    //     Vertex v;
-    //     v.vid = mv.id;
-    //     v.position.x = mv.position.x;
-    //     v.position.y = mv.position.y;
-    //     v.position.z = mv.position.z;
-    //     v.type = mv.type;
-    //     v.pos_update = mv.pos_update;
-    //     v.type_update = mv.type_update;
-
-    //     for (auto nb : mv.adj) {
-    //         v.nb_ids.push_back(static_cast<int>(nb));
-    //     }
-    //     skel_inc.push_back(v);
-    // }
-
-    // // Update skeleton_ in place -> This object will then be parsed by reference and mutated in vpman_ and planner_ respectively...
-    // // Updates vid2idx_ too
-    // update_skeleton(skel_inc);
-
-    // if (bootstrap_mode_) return;
-
-    // vpman_->set_vid2idx(vid2idx_); // Store current vid mapping in vpman_
-    // if (vpman_->update_viewpoints(skeleton_)) {
-    //     planner_->set_vid2idx(vid2idx_); // Store current vid mapping in vpman_
-
-    //     auto pose_opt = get_drone_pose(global_frame_, drone_frame_); // CHANGE TO DRONE FRAME!!
-    //     Eigen::Vector3f drone_pos(pose_opt->pose.position.x, pose_opt->pose.position.y, pose_opt->pose.position.z);
-    //     Eigen::Quaternionf drone_ori;
-    //     drone_ori.w() = pose_opt->pose.orientation.w;
-    //     drone_ori.x() = pose_opt->pose.orientation.x;
-    //     drone_ori.y() = pose_opt->pose.orientation.y;
-    //     drone_ori.z() = pose_opt->pose.orientation.z;
-    //     planner_->set_drone_pose(drone_pos, drone_ori);
-
-    //     if (planner_->plan(skeleton_)) {
-    //         // const auto& path = planner_->current_path();
-    //         publish_path();
-    //     }
-    // }
 }
 
 void PlannerNode::control_tick() {
@@ -731,7 +684,7 @@ void PlannerNode::control_tick() {
         return;
     }
 
-    // 4) Record last_pub_ and build message (state-owned)
+    // Record last_pub_ and build message (state-owned)
     last_pub_.clear();
     last_pub_.reserve(targets.size());
 
@@ -752,86 +705,9 @@ void PlannerNode::control_tick() {
         msg.poses.push_back(ps);
     }
 
-    // Locks release here (or copy msg out first if you prefer to publish unlocked)
     target_pub_->publish(msg);
     last_pub_time_ = this->get_clock()->now();
     adjusted_ = false;
-
-
-
-    // bool have_current = false;
-    // {
-    //     std::scoped_lock lk(planner_api_mtx_);
-    //     have_current = planner_->get_next_target(current);
-    // }
-
-    // if (have_current) {
-    //     const float dist_to_current = (current.position - drone_pos).norm();
-    //     if (dist_to_current <= reached_dist_th_) {
-    //         {
-    //             std::scoped_lock lk(planner_api_mtx_);
-    //             planner_->notify_reached(skeleton_);
-    //             RCLCPP_INFO(get_logger(), "Reached target - Advancing!");
-    //             vpman_->commit_coverage(current);
-    //         }
-    //     }
-    // }
-
-    // if (!adjusted_) {
-    //     const auto dt = this->get_clock()->now() - last_pub_time_;
-    //     if (dt < rclcpp::Duration(std::chrono::milliseconds(adjust_timeout_ms_))) {
-    //         RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 500, "Awaiting adjusted viewpoints!");
-    //         return;
-    //     }
-    //     else {
-    //         RCLCPP_WARN(get_logger(), "Adjustment timeout expired — proceeding with next publish.");
-    //         adjusted_ = true; // or re-publish same targets
-    //     }
-    // }
-    
-    // int k = 3;
-    // std::vector<Viewpoint> targets;
-
-    // {
-    //     std::scoped_lock lk(planner_api_mtx_);
-    //     if (!planner_->get_next_k_targets(targets, k)) {
-    //         RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "Could not get path - Exiting!");
-    //         return;
-    //     }
-    // }
-
-    // k = static_cast<int>(targets.size()); // size may have changed if not k current targets
-    // nav_msgs::msg::Path targets_msg;
-    // targets_msg.header.frame_id = global_frame_;
-    // targets_msg.header.stamp = this->get_clock()->now();
-
-    // {
-    //     std::scoped_lock lk(mtx_);
-    //     last_pub_.clear();
-    //     last_pub_.reserve(k);
-    //     for (int i=0; i<k; ++i) {
-    //         const Viewpoint& target = targets[i];
-    //         last_pub_.push_back( {target.vptid, target.target_vid, target.target_vp_pos} );
-            
-    //         geometry_msgs::msg::PoseStamped pose_msg;
-    //         // pose_msg.header = current_header;s
-    //         pose_msg.header.frame_id = global_frame_;
-    //         pose_msg.header.stamp = this->get_clock()->now();
-    //         pose_msg.pose.position.x = target.position.x();
-    //         pose_msg.pose.position.y = target.position.y();
-    //         pose_msg.pose.position.z = target.position.z();
-    //         pose_msg.pose.orientation.x = target.orientation.x();
-    //         pose_msg.pose.orientation.y = target.orientation.y();
-    //         pose_msg.pose.orientation.z = target.orientation.z();
-    //         pose_msg.pose.orientation.w = target.orientation.w();
-    //         targets_msg.poses.push_back(pose_msg);
-    //     }
-    // }
-
-    // RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000, "Published path lenght: %zu", targets_msg.poses.size());
-    // target_pub_->publish(targets_msg);
-    // last_pub_time_ = this->get_clock()->now();
-    // adjusted_ = false;
 }
 
 int main(int argc, char** argv) {
