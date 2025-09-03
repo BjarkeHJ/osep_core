@@ -262,15 +262,10 @@ bool PathPlanner::rh_plan_tick() {
     bool accept = !had_prev_plan ||
                 !std::isfinite(incumbent) ||
                 ( (incumbent > 0.0f) ? (score > incumbent * (1.0f + cfg_.hysteresis)) : (score > incumbent + 1e-6f) );
-                
-    // bool accept = (PD.rhs.last_plan_score < 0.0f) || 
-    //               (score > PD.rhs.last_plan_score * (1.f + cfg_.hysteresis)) ||
-    //               !had_prev_plan;
-                
-    if (!accept) {
-        std::cout << "[Planner] New plan not accepted - New score: " << score << ". Last score: " << PD.rhs.last_plan_score << std::endl;
-        return 0;
-    }
+
+    if (!accept) return 0;
+
+    std::cout << "[PLANNER] Accepted new plan - Excuting Path!" << std::endl;
 
     auto exec_gids = expand_to_graph_path(order, cand, parent);
     if (exec_gids.empty()) return 0;
@@ -286,14 +281,7 @@ bool PathPlanner::rh_plan_tick() {
     }
 
     PD.rhs.last_plan_score = score;
-
-    // choose next planning target
-    // PD.rhs.next_target_id = (PD.rhs.exec_path_ids.size() >= 2)
-    //                          ? PD.rhs.exec_path_ids[1]
-    //                          : PD.rhs.exec_path_ids.front();
-    
-    PD.rhs.next_target_id = PD.rhs.exec_path_ids.front(); // make first element the target for velocity controller
-
+    PD.rhs.next_target_id = PD.rhs.exec_path_ids.front();
     return 1;
 }
 
@@ -339,8 +327,6 @@ bool PathPlanner::set_path(std::vector<Vertex>& gskel) {
 }
 
 /* HELPERS */
-
-
 int PathPlanner::pick_start_gid_near_drone() {
     if (PD.graph.nodes.empty()) return -1;
     float best = std::numeric_limits<float>::infinity();
@@ -675,7 +661,6 @@ float PathPlanner::rebase_last_path(const std::vector<int>& gids, const std::vec
 
     return rew - cfg_.lambda * cost;
 }
-
 
 void PathPlanner::dijkstra(const std::vector<char>& allow, int s, std::vector<float>& dist, std::vector<int>& parent) {
     const int N = static_cast<int>(PD.graph.nodes.size());

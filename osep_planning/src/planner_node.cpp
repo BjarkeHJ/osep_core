@@ -138,12 +138,8 @@ PlannerNode::PlannerNode() : Node("PlannerNode") {
     adjust_timeout_ms_ = declare_parameter<int>("adjuste_timeout_ms", 250);
 
     // TOPICS
-    // map_topic_ = declare_parameter<std::string>("map_topic", "/osep/lidar_map/global_map");
-    // target_topic_ = declare_parameter<std::string>("target_topic", "/osep/planner/target"); // target for vel ctrl
-
     skeleton_topic_ = declare_parameter<std::string>("skeleton_topic", "/osep/gskel/global_skeleton_vertices"); // Global skeleton
     map_topic_ = declare_parameter<std::string>("map_topic", "/osep/tsdf/static_pointcloud"); // Global map
-    // target_topic_ = declare_parameter<std::string>("target_topic", "/osep/path"); // Target path
     target_topic_ = declare_parameter<std::string>("target_topic", "/osep/viewpoints"); // Target path
     adjusted_topic_ = declare_parameter<std::string>("adjusted_topic", "/osep/viewpoints_adjusted"); // Recieved adjustments
 
@@ -157,8 +153,8 @@ PlannerNode::PlannerNode() : Node("PlannerNode") {
     // VIEWPOINTMANAGER
     vpman_cfg.vpt_safe_dist = safe_dist_;
     vpman_cfg.map_voxel_size = map_voxel_size_;
-    vpman_cfg.cam_hfov_rad = 60.0f * M_1_PI / 180.0f;
-    vpman_cfg.cam_vfov_rad = 40.0f * M_1_PI / 180.0f;
+    vpman_cfg.cam_hfov_rad = 60.0f * static_cast<float>(M_PI) / 180.0f;
+    vpman_cfg.cam_vfov_rad = 40.0f * static_cast<float>(M_PI) / 180.0f;
     vpman_cfg.cam_Nx = 40;
     vpman_cfg.cam_Ny = 30;
     vpman_cfg.cam_max_range = 20.0f;
@@ -539,14 +535,15 @@ void PlannerNode::process_tick() {
         map_msg = latest_map_;
         latest_skel_.reset();
         latest_map_.reset();
-    }   
+    }
     
     if (!skel_msg || !map_msg) return;
     current_header = skel_msg->header;
-    
+
     // Build map_cloud / octree (node owned) - Protected
     {
-        std::lock_guard<std::mutex> lk(state_mtx_);
+        // std::lock_guard<std::mutex> lk(state_mtx_);
+        std::scoped_lock lk(state_mtx_);
         current_header = skel_msg->header;
         
         // map
@@ -593,26 +590,29 @@ void PlannerNode::process_tick() {
         (void)vpman_->update_viewpoints(skeleton_);
     }
 
+    bool planned = false;
+    auto pose_opt = get_drone_pose(global_frame_, drone_frame_);
+    if (!pose_opt) return;
+    Eigen::Vector3f drone_pos(pose_opt->pose.position.x, pose_opt->pose.position.y, pose_opt->pose.position.z);
+    Eigen::Quaternionf drone_ori;
+    drone_ori.w() = pose_opt->pose.orientation.w;
+    drone_ori.x() = pose_opt->pose.orientation.x;
+    drone_ori.y() = pose_opt->pose.orientation.y;
+    drone_ori.z() = pose_opt->pose.orientation.z;
+
     // Calling planner -> needs both protections
     {
         std::scoped_lock lock_all(state_mtx_, planner_mtx_); // Important to lock in that order
+        if (bootstrap_mode_) return;
+
         planner_->set_map(map_cloud_, map_octree_);
         planner_->set_vid2idx(vid2idx_);
-        auto pose_opt = get_drone_pose(global_frame_, drone_frame_);
-        if (!pose_opt) return;
-
-        Eigen::Vector3f drone_pos(pose_opt->pose.position.x, pose_opt->pose.position.y, pose_opt->pose.position.z);
-        Eigen::Quaternionf drone_ori;
-        drone_ori.w() = pose_opt->pose.orientation.w;
-        drone_ori.x() = pose_opt->pose.orientation.x;
-        drone_ori.y() = pose_opt->pose.orientation.y;
-        drone_ori.z() = pose_opt->pose.orientation.z;
         planner_->set_drone_pose(drone_pos, drone_ori);
+        planned = planner_->plan(skeleton_);
+    }
 
-        if (!bootstrap_mode_ && planner_->plan(skeleton_)) {
-            // const auto& path = planner_->current_path();
-            publish_path();
-        }
+    if (planned) {
+        publish_path();
     }
 }
 

@@ -29,8 +29,8 @@ struct PlannerConfig {
     // RHO params
     float budget = 1000.0f;          // max travel cost for this horizon (meters or edge cost units)
     float lambda = 1.0f;           // travel-vs-reward trade-off
-    float subgraph_radius = 40.0f; // BFS radius from current node (cost sum)
-    int   subgraph_max_nodes = 20;
+    float subgraph_radius = 200.0f; // BFS radius from current node (cost sum)
+    int   subgraph_max_nodes = 50;
     float hysteresis = 0.15f;      // replan only if new_score > old*(1+hysteresis)
     int   warm_steps = 1;          // how many first steps to commit before re-planning
 

@@ -50,7 +50,7 @@ bool ViewpointManager::sample_viewpoints(std::vector<Vertex>& gskel) {
 }
 
 bool ViewpointManager::filter_viewpoints(std::vector<Vertex>& gskel) {
-    const int MAX_ATTEMPTS = 5;
+    const int MAX_ATTEMPTS = 8;
     for (Vertex& v : gskel) {
         for (Viewpoint& vp : v.vpts) {
             if (is_not_safe_dist(vp.position)) {
@@ -80,14 +80,15 @@ bool ViewpointManager::filter_viewpoints(std::vector<Vertex>& gskel) {
 bool ViewpointManager::score_viewpoints(std::vector<Vertex>& gskel) {
     if (gskel.empty()) return 0;
 
+    const float denom = static_cast<float>(rayset_.rays_cam.size());
     for (Vertex& v : gskel) {
         for (Viewpoint& vp : v.vpts) {
-            // if (vp.visited) continue;
-            if (vp.visited) {
-                vp.score = 0.0f;
-            }
             if (vp.invalid) {
                 vp.score = -1e9f;
+                continue;
+            }
+            if (vp.visited) {
+                vp.score = 0.0f;
                 continue;
             }
 
@@ -96,7 +97,10 @@ bool ViewpointManager::score_viewpoints(std::vector<Vertex>& gskel) {
                 vp.score = 0.0f;
             }
             else {
-                vp.score = gs.new_surface - (0.5f * gs.overlap_surface);
+                // normalize [0 ; 1]
+                const float new_ratio = gs.new_surface / denom;
+                const float ovl_ratio = gs.overlap_surface / denom;
+                vp.score = new_ratio - 0.5 * ovl_ratio;
             }
             // std::cout << "Viewpoint Score: " << vp.score << std::endl;
         }
@@ -319,7 +323,6 @@ GainStats ViewpointManager::estimate_viewpoint_coverage(const Viewpoint& vp) {
     const Eigen::Matrix3f R = q.toRotationMatrix();
 
     GainStats gs{0,0};
-
     for (const auto& ray : rayset_.rays_cam) {
         Eigen::Vector3f r = R * ray; // transform to world
         float t = S * 0.5f;
@@ -339,13 +342,9 @@ GainStats ViewpointManager::estimate_viewpoint_coverage(const Viewpoint& vp) {
             }
             t += S;
         }
-
         if (!hit) continue;
     }
-    
-    // Normalize to value [0 ; 1]
-    gs.new_surface /= rayset_.rays_cam.size();
-    gs.overlap_surface /= rayset_.rays_cam.size();
+
     return gs;
 }
 
@@ -358,17 +357,23 @@ void ViewpointManager::commit_coverage(const Viewpoint& vp) {
     for (const auto& ray : rayset_.rays_cam) {
         Eigen::Vector3f r = R * ray;
         float t = S * 0.5f;
+
         while (t <= rayset_.max_range) {
             Eigen::Vector3f p = cam_o + t * r;
-            if (!is_occ_voxel(p)) {
-                cov_.seen.insert(grid_key(p,S));
-                new_count++;
-                break;
+            
+            if (is_occ_voxel(p)) {
+                uint64_t key = grid_key(p, S);
+                auto ins = cov_.seen.insert(key);
+                if (ins.second) {
+                    ++new_count;
+                }
+                break; // stop ray at first hit
             }
             t += S;
         }
     }
-    std::cout << "Reached viewpoint covered: " << new_count << " new voxels." << std::endl;
+    std::cout << "Reached viewpoint covered: " << new_count << " new hit-voxels." << std::endl;
+    std::cout << "Total covered voxel count: " << cov_.seen.size() << "/" << gmap->points.size() << std::endl;
 }
 
 
