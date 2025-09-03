@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <set>
 #include <unordered_set>
+#include <unordered_map>
 #include <pcl/common/common.h>
 #include <pcl/common/point_tests.h>
 #include <pcl/search/kdtree.h>
@@ -32,7 +33,12 @@ struct GSkelConfig {
     int niter_smooth_vertex;
     float vertex_smooth_coef;
     int min_branch_length;
+
+    float sparse_ds = 5.0f;          // target spacing between sparse vertices
+    float sparse_add_gap_ratio = 1.5f;// add if gap > ratio * ds
+    float joint_merge_radius = 0.6f;  // merge joints within this radius (m)
 };
+
 
 struct Edge {
     int u, v; // vertex idxs of the edge
@@ -69,6 +75,41 @@ struct UnionFind {
     }
 };
 
+struct SVertex {
+    int svid = -1; // unique stable sparse id
+    pcl::PointXYZ position;
+    int anchor_vid; // dense vid if this is an anchor joint/leaf; else -1
+    std::vector<int> nb_ids; // neighbors svids
+};
+
+struct SparseNode {
+    int svid;
+    float t; // arclength parameter from anchor A along branch
+};
+
+struct SparseBranch {
+    int anchor_svid_a = -1;
+    int anchor_svid_b = -1;
+    float L = 0.0f;
+    std::vector<SparseNode> nodes;
+};
+
+struct SparseState {
+    std::vector<SVertex> svers;
+    std::unordered_map<int,int> svid2idx; // map svid -> current index
+    pcl::PointCloud<pcl::PointXYZ>::Ptr scloud;
+    int next_svid = 0;
+
+    std::unordered_map<int,int> dense_vid2anchor_svid; // map dense endpoint vid -> anchor svid
+
+    struct PairHash {
+        size_t operator()(const std::pair<int,int>& p) const noexcept {
+            return (static_cast<uint64_t>(static_cast<uint32_t>(p.first)) << 32) ^ static_cast<uint32_t>(p.second);
+        }
+    };
+
+    std::unordered_map<std::pair<int,int>, SparseBranch, PairHash> branches;
+};
 
 struct Vertex {
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
@@ -105,6 +146,10 @@ struct GSkelData {
 
     int next_vid = 0;
     size_t gskel_size;
+
+    std::unordered_map<int,int> vid2idx;
+
+    SparseState SS;
 };
 
 class GSkel {
@@ -115,22 +160,33 @@ public:
     pcl::PointCloud<pcl::PointXYZ>& input_vertices() { return *GD.new_cands; }
     pcl::PointCloud<pcl::PointXYZ>::Ptr& output_cloud() { return GD.global_vers_cloud; }
     std::vector<Vertex>& output_vertices() { return GD.global_vers; }
-
+    
+    pcl::PointCloud<pcl::PointXYZ>::Ptr& output_sparse_cloud() { return GD.SS.scloud; }
 private:
-    /* Functions */
+    /* Dense Pipeline Functions */
     bool increment_skeleton();
     bool graph_adj();
     bool mst();
     bool vertex_merge();
     bool prune();
     bool smooth_vertex_positions();
-    bool vid_manager();    
-    
-    /* Helper */
+    bool vid_manager();        
+    /* Helper - Dense */
     void build_cloud_from_vertices();
     void graph_decomp();
     void merge_into(int keep, int del);
     bool size_assert();
+    void rebuild_vid_index_map();
+    
+    /* Sparsification Functions */
+    bool update_sparse_incremental();
+    /* Helper - Sparse */
+    void rebuild_svid_index_map();
+    void build_sparse_cloud();
+    void extract_branches_dense(std::vector<std::vector<int>>& out);
+    void cluster_joints(std::vector<std::vector<int>>& clusters);
+    int  ensure_anchor_svid(int dense_vid);
+    void ensure_branch_and_update(const std::vector<int>& chain, const std::unordered_map<int,int>& joint_rep_vid);
 
     GSkelConfig cfg_;
     bool running;

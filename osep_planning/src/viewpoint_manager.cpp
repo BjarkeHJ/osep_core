@@ -380,6 +380,10 @@ void ViewpointManager::commit_coverage(const Viewpoint& vp) {
 /* 
 
 TODO:
+- In viewpoint_sampling i resample if pos_update=true - I DONT WANT THIS
+    - Instead adjust the viewpoints accordingly using the same sampling methods. 
+
+    
 - Viewpoint Scoring based
     - Voxel novelty (viewpoint overlap instead of voxel count?)
 
