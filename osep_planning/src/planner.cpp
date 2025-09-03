@@ -198,7 +198,6 @@ bool PathPlanner::rh_plan_tick() {
         }
     }
     bool had_prev_plan = !prev_exec_gids.empty();
-    // had_prev_plan = false;
     
     // Extract subgraph around start
     auto cand = build_subgraph(start_gid); // subgraph gids
@@ -223,8 +222,8 @@ bool PathPlanner::rh_plan_tick() {
     auto order = greedy_orienteering(cand, start_gid, D);
 
     // Score for hysteresis: sum reward - lambda*cost
-    float rew = 0.0f;
-    float cost = 0.0f;
+    float rew = 0.0f; // viewpoint score accumulator
+    float cost = 0.0f; // edge cost accumulator
 
     for (size_t i=0; i<order.size(); ++i) {
         rew += node_reward(PD.graph.nodes[order[i]]);
@@ -249,12 +248,29 @@ bool PathPlanner::rh_plan_tick() {
     }
 
     float score = rew - cfg_.lambda * cost;
-    bool accept = (PD.rhs.last_plan_score < 0.0f) || 
-                  (score > PD.rhs.last_plan_score * (1.f + cfg_.hysteresis)) ||
-                  !had_prev_plan;
-                  //   (PD.rhs.exec_path_ids.empty());
+    
+    // rebase the last path score to the current world
+    float incumbent = -std::numeric_limits<float>::infinity();
+    if (had_prev_plan) {
+        incumbent = rebase_last_path(prev_exec_gids, cand, D);
+    }
 
-    if (!accept) return 0;
+    // Update last score
+    PD.rhs.last_plan_score = std::isfinite(incumbent) ? incumbent : -1.0f;
+
+    // path acceptance criteria
+    bool accept = !had_prev_plan ||
+                !std::isfinite(incumbent) ||
+                ( (incumbent > 0.0f) ? (score > incumbent * (1.0f + cfg_.hysteresis)) : (score > incumbent + 1e-6f) );
+                
+    // bool accept = (PD.rhs.last_plan_score < 0.0f) || 
+    //               (score > PD.rhs.last_plan_score * (1.f + cfg_.hysteresis)) ||
+    //               !had_prev_plan;
+                
+    if (!accept) {
+        std::cout << "[Planner] New plan not accepted - New score: " << score << ". Last score: " << PD.rhs.last_plan_score << std::endl;
+        return 0;
+    }
 
     auto exec_gids = expand_to_graph_path(order, cand, parent);
     if (exec_gids.empty()) return 0;
@@ -323,69 +339,7 @@ bool PathPlanner::set_path(std::vector<Vertex>& gskel) {
 }
 
 /* HELPERS */
-bool PathPlanner::line_of_sight(const Eigen::Vector3f& a, const Eigen::Vector3f& b) {
-    /* Corridor check */
-    if (!octree_) {
-        return 0; // nothing to do...
-    }
 
-    Eigen::Vector3f d = b - a;
-    float L = d.norm();
-    if (L <= 1e-6f) return 1;
-    Eigen::Vector3f u = d / L;
-
-    // pcl::octree::OctreePointCloudSearch<pcl::PointXYZ>::AlignedPointTVector centers;
-    // octree_->getIntersectedVoxelCenters(a, u, centers);
-
-    // const float tol = 0.6f * cfg_.map_voxel_size;
-    // const float tol2 = tol * tol;
-    // for (const auto& c : centers) {
-    //     Eigen::Vector3f cv = c.getVector3fMap();
-    //     if ((cv - a).squaredNorm() <= tol2) continue;
-    //     if ((cv - b).squaredNorm() <= tol2) continue;
-    //     return 0;
-    // }
-
-    // build local frame
-    Eigen::Vector3f tmp = (std::abs(u.z()) < 0.9f) ? Eigen::Vector3f::UnitZ() : Eigen::Vector3f::UnitY();
-    Eigen::Vector3f n1 = (tmp.cross(u)).normalized(); // Local Y
-    Eigen::Vector3f n2 = (u.cross(n1)).normalized(); // local Z
-
-    const float hx = 0.5f * L;
-    const float hy = 0.25f * cfg_.safe_dist;
-    const float hz = hy;
-
-    Eigen::Matrix3f R;
-    R.col(0) = u;
-    R.col(1) = n1;
-    R.col(2) = n2;
-    Eigen::Vector3f half_ext = Eigen::Vector3f(hx, hy, hz);
-    Eigen::Vector3f aabb_half = (R.cwiseAbs2() * half_ext).eval();
-
-    Eigen::Vector3f center = 0.5f * (a + b);
-    Eigen::Vector3f bbmin = center - aabb_half;
-    Eigen::Vector3f bbmax = center + aabb_half;
-
-    // Slight inflation
-    const float vx = cfg_.map_voxel_size;
-    bbmin.array() -= 0.5f * vx;
-    bbmax.array() += 0.5f * vx;
-
-    std::vector<int> ids;
-    octree_->boxSearch(bbmin, bbmax, ids);
-
-    const auto& cloud = octree_->getInputCloud();
-    for (int idx : ids) {
-        const auto& c = cloud->points[idx];
-        Eigen::Vector3f p(c.x, c.y, c.z);
-        Eigen::Vector3f pl = R.transpose() * (p - center);
-
-        if (std::abs(pl.x()) <= hx && std::abs(pl.y()) <= hy && std::abs(pl.z()) <= hz) {
-            return 0;
-        }
-    }   
-    return 1;
-}
 
 int PathPlanner::pick_start_gid_near_drone() {
     if (PD.graph.nodes.empty()) return -1;
@@ -439,17 +393,6 @@ std::vector<int> PathPlanner::build_subgraph(int start_gid) {
     return cand; // subgraph of gids
 }
 
-float PathPlanner::edge_cost(const GraphEdge& e) {
-    float w = e.w;
-    if (cfg_.geometric_bias != 0.0f && !e.topo) w += cfg_.geometric_bias;
-    if (cfg_.topo_bonus != 0.0f && e.topo) w = std::max(0.0f, w - cfg_.topo_bonus);
-    return w;
-}
-
-float PathPlanner::node_reward(const GraphNode& n) {
-    return n.score;
-}
-
 void PathPlanner::compute_apsp(const std::vector<int>& cand, std::vector<std::vector<float>>& D, std::vector<std::vector<int>>& parent) {
     /* All-pairs shortest path algorithm */
     const int M = static_cast<int>(cand.size());
@@ -473,32 +416,6 @@ void PathPlanner::compute_apsp(const std::vector<int>& cand, std::vector<std::ve
             D[i][j] = dist[cand[j]];
         }
         parent[i] = par;
-    }
-}
-
-void PathPlanner::dijkstra(const std::vector<char>& allow, int s, std::vector<float>& dist, std::vector<int>& parent) {
-    const int N = static_cast<int>(PD.graph.nodes.size());
-    dist.assign(N, std::numeric_limits<float>::infinity());
-    parent.assign(N, -1);
-    using P = std::pair<float,int>;
-    std::priority_queue<P, std::vector<P>, std::greater<P>> pq;
-    dist[s] = 0.0f;
-    pq.emplace(0.0f, s);
-    
-    while (!pq.empty()) {
-        auto [d,u] = pq.top();
-        pq.pop();
-        if (d != dist[u]) continue;
-        for (const auto& e : PD.graph.adj[u]) {
-            int v = e.to;
-            if (!allow[v]) continue; // not in subgraph (not allowed)
-            float w = edge_cost(e);
-            if (dist[v] > d + w) {
-                dist[v] = d + w;
-                parent[v] = u;
-                pq.emplace(dist[v], v);
-            }
-        }
     }
 }
 
@@ -705,10 +622,154 @@ std::vector<int> PathPlanner::expand_to_graph_path(const std::vector<int>& order
     return exec;
 }
 
+float PathPlanner::rebase_last_path(const std::vector<int>& gids, const std::vector<int>&cand, const std::vector<std::vector<float>>& D) {
+    if (gids.empty()) {
+        return -std::numeric_limits<float>::infinity();
+    }
+
+    // Global -> subgraph mapping
+    std::unordered_map<int,int> loc;
+    loc.reserve(cand.size() * 2);
+    for (int i=0; i<static_cast<int>(cand.size()); ++i) {
+        loc[cand[i]] = i;
+    }
+
+    // Reward: sum of current node scores (the ones that still exist)
+    float rew = 0.0f;
+    for (int g : gids) {
+        if (g < 0 || g >= static_cast<int>(PD.graph.nodes.size())) continue;
+        // if (PD.rhs.visited.count(PD.g2h[g])) continue; // visited?
+        rew += node_reward(PD.graph.nodes[g]);
+    }
+
+    // Cost: sum of shortest-path cost along the path
+    float cost = 0.0f;
+    for (size_t i=0; i+1 < gids.size(); ++i) {
+        int a = gids[i];
+        int b = gids[i+1];
+        float dab = std::numeric_limits<float>::infinity();
+
+        auto ia = loc.find(a);
+        auto ib = loc.find(b);
+        if (ia != loc.end() && ib != loc.end()) {
+            dab = D[ia->second][ib->second];
+        }
+        else {
+            // Fallback: constrain to the subgraph and run a single-source Dijkstra
+            std::vector<char> allow(PD.graph.nodes.size(), 0);
+            for (int gid : cand) allow[gid] = 1;
+            std::vector<float> dist;
+            std::vector<int> parent;
+            dijkstra(allow, a, dist, parent);
+            if (b >= 0 && b < static_cast<int>(dist.size())) {
+                dab = dist[b];
+            }
+        }
+
+        if (!std::isfinite(dab)) {
+            return -std::numeric_limits<float>::infinity();
+        }
+
+        cost += dab;
+    }
+
+    return rew - cfg_.lambda * cost;
+}
+
+
+void PathPlanner::dijkstra(const std::vector<char>& allow, int s, std::vector<float>& dist, std::vector<int>& parent) {
+    const int N = static_cast<int>(PD.graph.nodes.size());
+    dist.assign(N, std::numeric_limits<float>::infinity());
+    parent.assign(N, -1);
+    using P = std::pair<float,int>;
+    std::priority_queue<P, std::vector<P>, std::greater<P>> pq;
+    dist[s] = 0.0f;
+    pq.emplace(0.0f, s);
+    
+    while (!pq.empty()) {
+        auto [d,u] = pq.top();
+        pq.pop();
+        if (d != dist[u]) continue;
+        for (const auto& e : PD.graph.adj[u]) {
+            int v = e.to;
+            if (!allow[v]) continue; // not in subgraph (not allowed)
+            float w = edge_cost(e);
+            if (dist[v] > d + w) {
+                dist[v] = d + w;
+                parent[v] = u;
+                pq.emplace(dist[v], v);
+            }
+        }
+    }
+}
+
+bool PathPlanner::line_of_sight(const Eigen::Vector3f& a, const Eigen::Vector3f& b) {
+    /* Corridor check */
+    if (!octree_) {
+        return 0; // nothing to do...
+    }
+
+    Eigen::Vector3f d = b - a;
+    float L = d.norm();
+    if (L <= 1e-6f) return 1;
+    Eigen::Vector3f u = d / L;
+    
+    // build local frame
+    Eigen::Vector3f tmp = (std::abs(u.z()) < 0.9f) ? Eigen::Vector3f::UnitZ() : Eigen::Vector3f::UnitY();
+    Eigen::Vector3f n1 = (tmp.cross(u)).normalized(); // Local Y
+    Eigen::Vector3f n2 = (u.cross(n1)).normalized(); // local Z
+
+    const float hx = 0.5f * L;
+    const float hy = 0.25f * cfg_.safe_dist;
+    const float hz = hy;
+
+    Eigen::Matrix3f R;
+    R.col(0) = u;
+    R.col(1) = n1;
+    R.col(2) = n2;
+    Eigen::Vector3f half_ext = Eigen::Vector3f(hx, hy, hz);
+    Eigen::Vector3f aabb_half = (R.cwiseAbs2() * half_ext).eval();
+
+    Eigen::Vector3f center = 0.5f * (a + b);
+    Eigen::Vector3f bbmin = center - aabb_half;
+    Eigen::Vector3f bbmax = center + aabb_half;
+
+    // Slight inflation
+    const float vx = cfg_.map_voxel_size;
+    bbmin.array() -= 0.5f * vx;
+    bbmax.array() += 0.5f * vx;
+
+    std::vector<int> ids;
+    octree_->boxSearch(bbmin, bbmax, ids);
+
+    const auto& cloud = octree_->getInputCloud();
+    for (int idx : ids) {
+        const auto& c = cloud->points[idx];
+        Eigen::Vector3f p(c.x, c.y, c.z);
+        Eigen::Vector3f pl = R.transpose() * (p - center);
+
+        if (std::abs(pl.x()) <= hx && std::abs(pl.y()) <= hy && std::abs(pl.z()) <= hz) {
+            return 0;
+        }
+    }   
+    return 1;
+}
+
+float PathPlanner::edge_cost(const GraphEdge& e) {
+    float w = e.w;
+    if (cfg_.geometric_bias != 0.0f && !e.topo) w += cfg_.geometric_bias;
+    if (cfg_.topo_bonus != 0.0f && e.topo) w = std::max(0.0f, w - cfg_.topo_bonus);
+    return w;
+}
+
+float PathPlanner::node_reward(const GraphNode& n) {
+    return n.score;
+}
 
 
 /* Public methods for Control updates */
 bool PathPlanner::get_next_target(Viewpoint& out) {
+    /* not used... */
     if (PD.rhs.next_target_id == 0ull) return false;
 
     auto it = PD.h2g.find(PD.rhs.next_target_id);
@@ -726,36 +787,8 @@ bool PathPlanner::get_next_target(Viewpoint& out) {
     return true;
 }
 
-bool PathPlanner::get_next_k_targets(std::vector<Viewpoint>& out_k, int k) {
-    if (PD.rhs.exec_path_ids.empty()) return false;
-
-    // try to get k targets
-    if (k > static_cast<int>(PD.rhs.exec_path_ids.size())) {
-        k = static_cast<int>(PD.rhs.exec_path_ids.size());
-    }
-
-    out_k.resize(k); // size the vector correctly
-
-    for (int i=0; i<k; ++i) {
-        const uint64_t& id = PD.rhs.exec_path_ids[i];
-        auto it = PD.h2g.find(id);
-        if (it == PD.h2g.end()) return false;
-        int g = it->second;
-        if (g < 0 || g >= static_cast<int>(PD.graph.nodes.size())) return false;
-
-        const GraphNode& gn = PD.graph.nodes[g];
-        out_k[i].position = gn.p;
-        out_k[i].yaw = gn.yaw;
-        out_k[i].orientation = yaw_to_quat(gn.yaw);
-        out_k[i].target_vid = gn.vid;
-        out_k[i].target_vp_pos = gn.k;
-        out_k[i].vptid = gn.vptid;
-        out_k[i].in_path = true;
-    }
-    return true;
-}
-
 bool PathPlanner::get_start(Viewpoint& out) {
+    /* not used*/
     if (PD.rhs.start_id == 0ull) return false;
     auto it = PD.h2g.find(PD.rhs.start_id);
     if (it == PD.h2g.end()) return false;
@@ -768,6 +801,43 @@ bool PathPlanner::get_start(Viewpoint& out) {
     out.target_vid = gn.vid;
     out.target_vp_pos = gn.k;
     out.in_path = true;
+    return true;
+}
+
+bool PathPlanner::get_next_k_targets(std::vector<Viewpoint>& out_k, int k) {
+    if (PD.rhs.exec_path_ids.empty()) {
+        std::cout << "GetNextKTargets Error: 1" << std::endl; // no viewpoint in path
+        return false;
+    }
+
+    // try to get k targets
+    if (k > static_cast<int>(PD.rhs.exec_path_ids.size())) {
+        k = static_cast<int>(PD.rhs.exec_path_ids.size());
+    }
+
+    out_k.resize(k); // size the vector correctly
+
+    for (int i=0; i<k; ++i) {
+        const uint64_t& id = PD.rhs.exec_path_ids[i];
+        auto it = PD.h2g.find(id);
+        if (it == PD.h2g.end()) {
+            std::cout << "GetNextKTargets Error: 2" << std::endl; // cannot find handle in gids
+            return false;
+        }
+        int g = it->second;
+        if (g < 0 || g >= static_cast<int>(PD.graph.nodes.size())) {
+            std::cout << "GetNextKTargets Error: 3" << std::endl; // gid not valid
+            return false;
+        }
+        const GraphNode& gn = PD.graph.nodes[g];
+        out_k[i].position = gn.p;
+        out_k[i].yaw = gn.yaw;
+        out_k[i].orientation = yaw_to_quat(gn.yaw);
+        out_k[i].target_vid = gn.vid;
+        out_k[i].target_vp_pos = gn.k;
+        out_k[i].vptid = gn.vptid;
+        out_k[i].in_path = true;
+    }
     return true;
 }
 
@@ -841,7 +911,7 @@ bool PathPlanner::mark_visited_in_skeleton(uint64_t hid, std::vector<Vertex>& gs
 }
 
 
-s
+
 /* 
 
 TODO:

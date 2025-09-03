@@ -82,7 +82,10 @@ bool ViewpointManager::score_viewpoints(std::vector<Vertex>& gskel) {
 
     for (Vertex& v : gskel) {
         for (Viewpoint& vp : v.vpts) {
-            if (vp.visited) continue;
+            // if (vp.visited) continue;
+            if (vp.visited) {
+                vp.score = 0.0f;
+            }
             if (vp.invalid) {
                 vp.score = -1e9f;
                 continue;
@@ -339,6 +342,10 @@ GainStats ViewpointManager::estimate_viewpoint_coverage(const Viewpoint& vp) {
 
         if (!hit) continue;
     }
+    
+    // Normalize to value [0 ; 1]
+    gs.new_surface /= rayset_.rays_cam.size();
+    gs.overlap_surface /= rayset_.rays_cam.size();
     return gs;
 }
 
