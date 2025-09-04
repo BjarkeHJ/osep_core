@@ -92,11 +92,11 @@ private:
     int pick_start_gid_near_drone();
     std::vector<int> build_subgraph(int start_gid, std::vector<char>& allow_transit);
     std::vector<int> greedy_plan(int start_gid, const std::vector<int>& cand, const std::vector<char>& allow_transit, float budget_left);
-
     void dijkstra(const std::vector<char>& allow, int s, std::vector<float>& dist, std::vector<int>& parent, const float radius=std::numeric_limits<float>::infinity());
     bool line_of_sight(const Eigen::Vector3f& a, const Eigen::Vector3f& b);
     float edge_cost(GraphEdge& e);
     float node_reward(const GraphNode& n);
+    float path_travel_cost(const std::vector<int>& gids);
 
     bool mark_visited_in_skeleton(uint64_t hid, std::vector<Vertex>& gskel);
     

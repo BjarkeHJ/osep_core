@@ -217,31 +217,31 @@ bool PathPlanner::rh_plan_tick() {
 
     std::cout << "Executable Viewpoints: " << exec_gids.size() << std::endl;
 
-    // subgraph -> global graph mapping
-    // std::unordered_map<int,int> loc;
-    // loc.reserve(cand.size() * 2);
-    // for (int i=0; i<static_cast<int>(cand.size()); ++i) {
-    //     loc[cand[i]] = i;
-    // }
-
     // reward and cost
     float rew = 0.0f;
-    float cost = 0.0f;
     for (size_t i=0; i+1<exec_gids.size(); ++i) {
         rew += node_reward(PD.graph.nodes[exec_gids[i]]);
     }
+    float cost = path_travel_cost(exec_gids);
+    float new_score = rew - cfg_.lambda * cost;
 
     PD.rhs.exec_path_ids.clear();
     PD.rhs.exec_path_ids.reserve(exec_gids.size());
     for (int g : exec_gids) {
         uint64_t vptid = PD.g2h[g];
         if (vptid == 0ull) continue;
-        // if (PD.rhs.visited.count(vptid)) continue;
+        if (PD.rhs.visited.count(vptid)) continue;
         PD.rhs.exec_path_ids.push_back(vptid);
     }
 
-    PD.rhs.last_plan_score = rew;
-    PD.rhs.next_target_id = PD.rhs.exec_path_ids.front();
+    PD.rhs.last_plan_score = new_score;
+    
+    size_t idx = 0;
+    while (idx < PD.rhs.exec_path_ids.size() && PD.rhs.exec_path_ids[idx] == PD.rhs.start_id) {
+        ++idx;
+    }
+    PD.rhs.next_target_id = (idx < PD.rhs.exec_path_ids.size()) ? PD.rhs.exec_path_ids[idx] : 0ull;
+    // PD.rhs.next_target_id = PD.rhs.exec_path_ids.front();
     return 1;
 }
 
@@ -401,7 +401,7 @@ std::vector<int> PathPlanner::greedy_plan(int start_gid, const std::vector<int>&
         float best_travel = 0.0f;
 
         for (int g : cand) {
-            if (g < 0 || g <= N) continue;
+            if (g < 0 || g >= N) continue;
             if (g == cur) continue;
             if (picked[g]) continue;
 
@@ -565,6 +565,30 @@ float PathPlanner::node_reward(const GraphNode& n) {
     return n.score;
 }
 
+float PathPlanner::path_travel_cost(const std::vector<int>& gids) {
+    if (gids.size() < 2) return 0.0f;
+    float c = 0.0f;
+
+    for (size_t i=1; i<gids.size(); ++i) {
+        bool found = false;
+        for (auto& e : PD.graph.adj[gids[i-1]]) {
+            if (e.to == gids[i]) {
+                c += edge_cost(e);
+                found = true;
+                break;
+            }
+        }
+
+        if (!found) {
+            std::cout << "PathTravelCost: Edge did not exist..." << std::endl;
+            return std::numeric_limits<float>::infinity();
+        }
+
+    }
+
+    return c;
+}
+
 
 /* Public methods for Control updates */
 bool PathPlanner::get_next_target(Viewpoint& out) {
@@ -605,27 +629,34 @@ bool PathPlanner::get_start(Viewpoint& out) {
 
 bool PathPlanner::get_next_k_targets(std::vector<Viewpoint>& out_k, int k) {
     if (PD.rhs.exec_path_ids.empty()) {
-        std::cout << "GetNextKTargets Error: 1" << std::endl; // no viewpoint in path
+        // std::cout << "GetNextKTargets Error: 1" << std::endl; // no viewpoint in path
         return false;
     }
 
+    int s = 0;
+    while (s < (int)PD.rhs.exec_path_ids.size() && PD.rhs.exec_path_ids[s] == PD.rhs.start_id) {
+        ++s;
+    }
+    if (s >= (int)PD.rhs.exec_path_ids.size()) return false;
+
+
     // try to get k targets
-    if (k > static_cast<int>(PD.rhs.exec_path_ids.size())) {
-        k = static_cast<int>(PD.rhs.exec_path_ids.size());
+    int avail = static_cast<int>(PD.rhs.exec_path_ids.size()) - s;
+    if (k > avail) {
+        k = avail;
     }
 
     out_k.resize(k); // size the vector correctly
-
     for (int i=0; i<k; ++i) {
         const uint64_t& id = PD.rhs.exec_path_ids[i];
         auto it = PD.h2g.find(id);
         if (it == PD.h2g.end()) {
-            std::cout << "GetNextKTargets Error: 2" << std::endl; // cannot find handle in gids
+            // std::cout << "GetNextKTargets Error: 2" << std::endl; // cannot find handle in gids
             return false;
         }
         int g = it->second;
         if (g < 0 || g >= static_cast<int>(PD.graph.nodes.size())) {
-            std::cout << "GetNextKTargets Error: 3" << std::endl; // gid not valid
+            // std::cout << "GetNextKTargets Error: 3" << std::endl; // gid not valid
             return false;
         }
         const GraphNode& gn = PD.graph.nodes[g];
