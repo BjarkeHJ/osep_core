@@ -648,7 +648,7 @@ bool PathPlanner::get_next_k_targets(std::vector<Viewpoint>& out_k, int k) {
 
     out_k.resize(k); // size the vector correctly
     for (int i=0; i<k; ++i) {
-        const uint64_t& id = PD.rhs.exec_path_ids[i];
+        const uint64_t& id = PD.rhs.exec_path_ids[s + i];
         auto it = PD.h2g.find(id);
         if (it == PD.h2g.end()) {
             // std::cout << "GetNextKTargets Error: 2" << std::endl; // cannot find handle in gids
