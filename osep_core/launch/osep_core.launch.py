@@ -49,40 +49,31 @@ def generate_launch_description():
                 {"safety_distance": SAFETY_DISTANCE},
             ]
         ),
-        Node(
-            package="osep_skeleton_decomp",
-            executable="osep_rosa",
-            name="RosaNode",
-            output="screen",
-            parameters=[
+        # Node(
+        #     package="osep_skeleton_decomp",
+        #     executable="osep_rosa",
+        #     name="RosaNode",
+        #     output="screen",
+        #     parameters=[
 
-            ]
-        ),
-        Node(
-            package="osep_skeleton_decomp",
-            executable="osep_gskel",
-            name="GSkelNode",
-            output="screen",
-            parameters=[
+        #     ]
+        # ),
+        # Node(
+        #     package="osep_skeleton_decomp",
+        #     executable="osep_gskel",
+        #     name="GSkelNode",
+        #     output="screen",
+        #     parameters=[
 
-            ]
-        ),
-        Node(
-            package="osep_planning",
-            executable="osep_planner",
-            name="PlannerNode",
-            output="screen",
-            parameters=[
+        #     ]
+        # ),
+        # Node(
+        #     package="osep_planning",
+        #     executable="osep_planner",
+        #     name="PlannerNode",
+        #     output="screen",
+        #     parameters=[
 
-            ]
-        ),
-        Node(
-            package="osep_lidar_map",
-            executable="osep_lidar_map",
-            name="LidarMapNode",
-            output="screen",
-            parameters=[
-                
-            ]
-        )
+        #     ]
+        # ),
     ])

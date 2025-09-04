@@ -156,7 +156,9 @@ tf2::Quaternion PathInterpolator::interpolateYaw(
 	} else if (delta_yaw < -M_PI) {
 		delta_yaw += 2 * M_PI;
 	}
-	double interpolated_yaw = start_yaw + t * delta_yaw;
+	double eased_t = (t >= 0.5) ? 1.0 : t + 0.3 * std::sin(M_PI * t);
+	eased_t = std::clamp(eased_t, 0.0, 1.0);
+	double interpolated_yaw = start_yaw + eased_t * delta_yaw;
 	tf2::Quaternion interpolated_quat;
 	interpolated_quat.setRPY(0, 0, interpolated_yaw);
 	return interpolated_quat;
