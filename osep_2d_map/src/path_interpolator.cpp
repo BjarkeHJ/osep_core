@@ -518,13 +518,17 @@ std::vector<geometry_msgs::msg::PoseStamped> PathInterpolator::smoothPath(
 		tf2::Quaternion quaternion;
 		quaternion.setRPY(0, 0, yaw_smooth[i]);
 		pose.pose.orientation = tf2::toMsg(quaternion);
-		auto adjusted = findAdjustedViewpoint(pose, interpolation_distance);
-		if (adjusted) {
-			smoothed_path.push_back(*adjusted);
-		} else {
-			smoothed_path.push_back(pose);
-		}
+		smoothed_path.push_back(pose);
+	
+
+		// auto adjusted = findAdjustedViewpoint(pose, interpolation_distance);
+		// if (adjusted) {
+		// 	smoothed_path.push_back(*adjusted);
+		// } else {
+		// 	smoothed_path.push_back(pose);
+		// }
 	}
+
 	return smoothed_path;
 }
 
@@ -559,7 +563,7 @@ nav_msgs::msg::Path PathInterpolator::buildInitPath(const geometry_msgs::msg::Po
 bool PathInterpolator::planSegments(const nav_msgs::msg::Path& init_path, nav_msgs::msg::Path& raw_path, int& fail_idx) {
     raw_path.header.stamp = this->now();
     raw_path.header.frame_id = costmap_->header.frame_id;
-    for (size_t i = 0; i < init_path.poses.size() - 1 && i < 4; ++i) {
+    for (size_t i = 0; i < init_path.poses.size() - 1 && i < 10; ++i) {
         const auto &start = init_path.poses[i];
         const auto &goal = init_path.poses[i + 1];
         auto segment_path = planPath(start, goal);

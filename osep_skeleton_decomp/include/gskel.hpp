@@ -119,15 +119,18 @@ public:
     std::vector<Vertex>& output_vertices() { return GD.global_vers; }
     
 private:
-    /* Dense Pipeline Functions */
+    /* Functions */
     bool increment_skeleton();
     bool graph_adj();
     bool mst();
     bool vertex_merge();
     bool prune();
     bool smooth_vertex_positions();
-    bool vid_manager();        
-    /* Helper - Dense */
+    bool vid_manager();
+    
+    bool downsample();
+    
+    /* Helper */
     void build_cloud_from_vertices();
     void graph_decomp();
     void merge_into(int keep, int del);

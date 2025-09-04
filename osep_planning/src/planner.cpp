@@ -162,7 +162,6 @@ bool PathPlanner::rh_plan_tick() {
     }
 
     if (PD.rhs.start_id == 0ull) { // default 0 unsigned long long
-        std::cout << "[RH PLANNER] Setting new starting point!" << std::endl;
         int start_gid = pick_start_gid_near_drone(); // get graph index of starting point
         if (start_gid < 0) return 0;
         PD.rhs.start_id = PD.g2h[start_gid]; // set start id as corresponding unique id
@@ -206,8 +205,7 @@ bool PathPlanner::rh_plan_tick() {
 
     std::cout << "Nodes in subgraph: " << cand.size() << std::endl;
 
-    float tick_budget = 50; // maybe remove again...
-    auto exec_gids = greedy_plan(start_gid, cand, allow_transit, tick_budget);
+    auto exec_gids = greedy_plan(start_gid, cand, allow_transit, cfg_.budget);
 
     if (exec_gids.empty()) {
         PD.rhs.exec_path_ids.clear();
@@ -552,13 +550,13 @@ bool PathPlanner::line_of_sight(const Eigen::Vector3f& a, const Eigen::Vector3f&
 }
 
 float PathPlanner::edge_cost(GraphEdge& e) {
-    // float w = e.w;
-    // if (cfg_.geometric_bias != 0.0f && !e.topo) w += cfg_.geometric_bias;
-    // if (cfg_.topo_bonus != 0.0f && e.topo) w = std::max(0.0f, w - cfg_.topo_bonus);
-    // return w;
+    float w = e.w;
+    if (cfg_.geometric_bias != 0.0f && !e.topo) w += cfg_.geometric_bias;
+    if (cfg_.topo_bonus != 0.0f && e.topo) w = std::max(0.0f, w - cfg_.topo_bonus);
 
-    if (e.w < 0.0f) e.w = 0.0f; // clamp edge cost to zero
-    return e.w;
+    if (w < 0.0f) w = 0.0f; // clamp edge cost to zero
+    
+    return w;
 }
 
 float PathPlanner::node_reward(const GraphNode& n) {

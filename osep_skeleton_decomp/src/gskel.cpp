@@ -445,6 +445,12 @@ bool GSkel::vid_manager() {
     return 1;
 }
 
+bool GSkel::downsample() {
+    if (GD.global_vers.empty()) return 0;
+
+    return 1;
+}
+
 
 /* Helpers */
 void GSkel::build_cloud_from_vertices() {

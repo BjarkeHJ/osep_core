@@ -22,12 +22,12 @@ bool ViewpointManager::update_viewpoints(std::vector<Vertex>& gskel) {
     running = sample_viewpoints(gskel);
     running = filter_viewpoints(gskel);
 
-    auto t_start = std::chrono::high_resolution_clock::now();
+    // auto t_start = std::chrono::high_resolution_clock::now();
 
     running = score_viewpoints(gskel);
 
-    auto t_end = std::chrono::high_resolution_clock::now();
-    auto t_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(t_end-t_start).count();
+    // auto t_end = std::chrono::high_resolution_clock::now();
+    // auto t_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(t_end-t_start).count();
     // std::cout << "[Viewpoint Scoring] Time Elapsed: " << t_elapsed << " ms" << std::endl;
 
     return running;
@@ -40,7 +40,14 @@ bool ViewpointManager::sample_viewpoints(std::vector<Vertex>& gskel) {
         Vertex& v = gskel[i];
         if (v.vid != i) std::cout << "WARNING: VID DOES NOT MATCH SKEL INDEX" << std::endl;
         
-        const bool need_resample = v.type_update || v.pos_update || v.vpts.empty();
+        // const bool need_resample = v.type_update || v.pos_update || v.vpts.empty();
+        if (v.type_update) {
+            // update viewpoints
+
+            continue;
+        }
+
+        const bool need_resample = v.type_update || v.vpts.empty();
         if (!need_resample) continue;
 
         std::vector<Viewpoint> new_vpts = generate_viewpoints(gskel, v);
