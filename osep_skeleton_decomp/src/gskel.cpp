@@ -36,7 +36,7 @@ bool GSkel::gskel_run() {
 
     // Keep small fusing distance -> Downsample to get sparser skeleton???
 
-    RUN_STEP(update_sparse_incremental);
+    // RUN_STEP(update_sparse_incremental);
     running = 1;
 
     // auto te = std::chrono::high_resolution_clock::now();
@@ -448,102 +448,6 @@ bool GSkel::vid_manager() {
     return 1;
 }
 
-/* Helpers */
-void GSkel::build_cloud_from_vertices() {
-    if (GD.global_vers.empty()) return;
-    GD.global_vers_cloud->clear();
-    for (const auto& v : GD.global_vers) {
-        if (!pcl::isFinite(v.position)) {
-            std::cout << "INVALID POSITION!!" << std::endl;
-        }
-        GD.global_vers_cloud->points.push_back(v.position);
-    }
-
-    GD.global_vers_cloud->width  = static_cast<uint32_t>(GD.global_vers_cloud->points.size());
-    GD.global_vers_cloud->height = 1;
-    GD.global_vers_cloud->is_dense = true;
-
-    if (GD.global_vers.size() != GD.global_vers_cloud->points.size()) {
-        std::cout << "NOT SAME SIZE???" << std::endl;
-    }
-}
-
-void GSkel::rebuild_vid_index_map() {
-    GD.vid2idx.clear();
-    GD.vid2idx.reserve(GD.global_vers.size());
-    for (int i=0; i<static_cast<int>(GD.global_vers.size()); ++i) {
-        const int vid = GD.global_vers[i].vid;
-        if (vid >= 0) {
-            GD.vid2idx[vid] = i;
-        }
-    }
-}
-
-void GSkel::graph_decomp() {
-    GD.joints.clear();
-    GD.leafs.clear();
-
-    const int N = GD.global_vers.size();
-    for (int i=0; i<N; ++i) {
-        auto &vg = GD.global_vers[i];
-        int degree = GD.global_adj[i].size();
-        int v_type = 0;
-
-        switch (degree)
-        {
-        case 1:
-            GD.leafs.push_back(i);
-            v_type = 1;
-            break;
-        case 2:
-            v_type = 2;
-            break;
-        default:
-            if (degree > 2) {
-                GD.joints.push_back(i);
-                v_type = 3;
-            }
-            break;
-        }
-
-        // update type
-        if (vg.type != v_type) vg.type_update = true;
-        vg.type = v_type;
-    }
-}
-
-void GSkel::merge_into(int keep, int del) {
-    auto& Vi = GD.global_vers[keep];
-    auto& Vj = GD.global_vers[del];
-
-    int tot = Vi.obs_count + Vj.obs_count;
-    if (tot == 0) tot = 1;
-    Vi.position.getVector3fMap() = (Vi.position.getVector3fMap() * Vi.obs_count + Vj.position.getVector3fMap() * Vj.obs_count) / static_cast<float>(tot);
-    Vi.obs_count = tot;
-    Vi.pos_update = true; // position updated
-
-    // Remap neighbors 
-    for (int nb : GD.global_adj[del]) {
-        if (nb == keep) continue;
-        auto& keep_nbs = GD.global_adj[keep];
-        if (std::find(keep_nbs.begin(), keep_nbs.end(), nb) == keep_nbs.end()) {
-            keep_nbs.push_back(nb);
-        }
-
-        // Remap neighbor's neighbors
-        auto &nbs_nb = GD.global_adj[nb];
-        std::replace(nbs_nb.begin(), nbs_nb.end(), del, keep);
-    }
-}
-
-bool GSkel::size_assert() {
-    const int A = static_cast<int>(GD.global_vers.size());
-    const int B = static_cast<int>(GD.global_adj.size());
-    const int C = static_cast<int>(GD.gskel_size);
-    const bool ok = (A == B) && (B == C);
-    return ok;
-}
-
 bool GSkel::update_sparse_incremental() {
     // Update anchor positions (dense anchors move slightly)
     for (auto& kv : GD.SS.dense_vid2anchor_svid) {
@@ -642,6 +546,102 @@ bool GSkel::update_sparse_incremental() {
     GD.SS.scloud->is_dense = true;
 
     return true;
+}
+
+/* Helpers */
+void GSkel::build_cloud_from_vertices() {
+    if (GD.global_vers.empty()) return;
+    GD.global_vers_cloud->clear();
+    for (const auto& v : GD.global_vers) {
+        if (!pcl::isFinite(v.position)) {
+            std::cout << "INVALID POSITION!!" << std::endl;
+        }
+        GD.global_vers_cloud->points.push_back(v.position);
+    }
+
+    GD.global_vers_cloud->width  = static_cast<uint32_t>(GD.global_vers_cloud->points.size());
+    GD.global_vers_cloud->height = 1;
+    GD.global_vers_cloud->is_dense = true;
+
+    if (GD.global_vers.size() != GD.global_vers_cloud->points.size()) {
+        std::cout << "NOT SAME SIZE???" << std::endl;
+    }
+}
+
+void GSkel::rebuild_vid_index_map() {
+    GD.vid2idx.clear();
+    GD.vid2idx.reserve(GD.global_vers.size());
+    for (int i=0; i<static_cast<int>(GD.global_vers.size()); ++i) {
+        const int vid = GD.global_vers[i].vid;
+        if (vid >= 0) {
+            GD.vid2idx[vid] = i;
+        }
+    }
+}
+
+void GSkel::graph_decomp() {
+    GD.joints.clear();
+    GD.leafs.clear();
+
+    const int N = GD.global_vers.size();
+    for (int i=0; i<N; ++i) {
+        auto &vg = GD.global_vers[i];
+        int degree = GD.global_adj[i].size();
+        int v_type = 0;
+
+        switch (degree)
+        {
+        case 1:
+            GD.leafs.push_back(i);
+            v_type = 1;
+            break;
+        case 2:
+            v_type = 2;
+            break;
+        default:
+            if (degree > 2) {
+                GD.joints.push_back(i);
+                v_type = 3;
+            }
+            break;
+        }
+
+        // update type
+        if (vg.type != v_type) vg.type_update = true;
+        vg.type = v_type;
+    }
+}
+
+void GSkel::merge_into(int keep, int del) {
+    auto& Vi = GD.global_vers[keep];
+    auto& Vj = GD.global_vers[del];
+
+    int tot = Vi.obs_count + Vj.obs_count;
+    if (tot == 0) tot = 1;
+    Vi.position.getVector3fMap() = (Vi.position.getVector3fMap() * Vi.obs_count + Vj.position.getVector3fMap() * Vj.obs_count) / static_cast<float>(tot);
+    Vi.obs_count = tot;
+    Vi.pos_update = true; // position updated
+
+    // Remap neighbors 
+    for (int nb : GD.global_adj[del]) {
+        if (nb == keep) continue;
+        auto& keep_nbs = GD.global_adj[keep];
+        if (std::find(keep_nbs.begin(), keep_nbs.end(), nb) == keep_nbs.end()) {
+            keep_nbs.push_back(nb);
+        }
+
+        // Remap neighbor's neighbors
+        auto &nbs_nb = GD.global_adj[nb];
+        std::replace(nbs_nb.begin(), nbs_nb.end(), del, keep);
+    }
+}
+
+bool GSkel::size_assert() {
+    const int A = static_cast<int>(GD.global_vers.size());
+    const int B = static_cast<int>(GD.global_adj.size());
+    const int C = static_cast<int>(GD.gskel_size);
+    const bool ok = (A == B) && (B == C);
+    return ok;
 }
 
 /* Helpers - Dense */

@@ -309,7 +309,7 @@ void GSkelNode::process_tick() {
     publish_gvert(gskel_->output_vertices(), hdr);
     publish_edges(gskel_->output_vertices(), hdr);
 
-    publish_sparse_cloud(gskel_->output_sparse_cloud(), hdr);
+    // publish_sparse_cloud(gskel_->output_sparse_cloud(), hdr);
 }
 
 rclcpp::Time GSkelNode::tf_safe_stamp(const std::string& target, const std::string& source) {
