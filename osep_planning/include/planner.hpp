@@ -91,11 +91,7 @@ private:
     /* Helper */
     int pick_start_gid_near_drone();
     std::vector<int> build_subgraph(int start_gid, std::vector<char>& allow_transit);
-    void compute_apsp(const std::vector<int>& cand, const std::vector<char>& allow_transit, std::vector<std::vector<float>>& D, std::vector<std::vector<int>>& parent);
-    std::vector<int> greedy_orienteering(const std::vector<int>& cand, int start_gid, const std::vector<std::vector<float>>& D);
-    void two_opt_improve(std::vector<int>& order, const std::vector<std::vector<float>>& D, const std::unordered_map<int,int>& loc);
-    std::vector<int> expand_to_graph_path(const std::vector<int>& order, const std::vector<int>& cand, const std::vector<std::vector<int>>& parent);
-    float rebase_last_path(const std::vector<int>& gids, const std::vector<int>&cand, const std::vector<std::vector<float>>& D);
+    std::vector<int> greedy_plan(int start_gid, const std::vector<int>& cand, const std::vector<char>& allow_transit, float budget_left);
 
     void dijkstra(const std::vector<char>& allow, int s, std::vector<float>& dist, std::vector<int>& parent, const float radius=std::numeric_limits<float>::infinity());
     bool line_of_sight(const Eigen::Vector3f& a, const Eigen::Vector3f& b);
@@ -120,7 +116,6 @@ private:
     
     bool running;
     bool plan_path = false;
-
 };
 
 

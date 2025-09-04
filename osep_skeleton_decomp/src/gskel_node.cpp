@@ -37,8 +37,6 @@ private:
     void publish_gvert(const std::vector<Vertex>& vertices, const std_msgs::msg::Header& src_header);
     void publish_edges(const std::vector<Vertex>& vertices, const std_msgs::msg::Header& src_header);
 
-    void publish_sparse_cloud(pcl::PointCloud<pcl::PointXYZ>::Ptr& scloud, const std_msgs::msg::Header& src_header);
-
     rclcpp::Time tf_safe_stamp(const std::string& target, const std::string& source);
 
     /* ROS2 */
@@ -46,9 +44,6 @@ private:
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr gskel_pub_;
     rclcpp::Publisher<MsgSkeleton>::SharedPtr gvert_pub_;
     rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr conn_mk_pub_;
-
-    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr sparse_cloud_pub_;
-
 
     std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
     std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
@@ -60,7 +55,6 @@ private:
     std::string gvert_topic_;
     std::string edge_topic_;
     std::string sparse_cloud_topic_;
-    std::string sparse_edge_topic_;
 
     std::string global_frame_id_;
     int tick_ms_;
@@ -87,8 +81,8 @@ GSkelNode::GSkelNode() : Node("GSkelNode") {
     global_frame_id_ = declare_parameter<std::string>("global_frame_id", "odom");
     // GSKEL
     gskel_cfg.gnd_th = declare_parameter<float>("gskel_gnd_th", 60.0f);
-    gskel_cfg.fuse_dist_th = declare_parameter<float>("gskel_fuse_dist_th", 0.5f);
-    gskel_cfg.fuse_conf_th = declare_parameter<float>("gskel_fuse_conf_th", 0.05f);
+    gskel_cfg.fuse_dist_th = declare_parameter<float>("gskel_fuse_dist_th", 5.0f);
+    gskel_cfg.fuse_conf_th = declare_parameter<float>("gskel_fuse_conf_th", 0.5f);
     gskel_cfg.lkf_pn = declare_parameter<float>("gskel_lkf_pn", 0.0001f);
     gskel_cfg.lkf_mn = declare_parameter<float>("gskel_lkf_mn", 0.1f);
     gskel_cfg.max_obs_wo_conf = declare_parameter<int>("gskel_max_obs_wo_conf", 5);
@@ -109,9 +103,6 @@ GSkelNode::GSkelNode() : Node("GSkelNode") {
     gskel_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(gskel_topic_, pub_qos);
     gvert_pub_ = this->create_publisher<MsgSkeleton>(gvert_topic_, pub_qos);
     conn_mk_pub_ = this->create_publisher<visualization_msgs::msg::Marker>(edge_topic_, pub_qos);
-
-    sparse_cloud_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/osep/gskel/sparse_cloud", pub_qos);
-
 
     tick_timer_ = create_wall_timer(std::chrono::milliseconds(tick_ms_), std::bind(&GSkelNode::process_tick, this));
 
@@ -229,22 +220,6 @@ void GSkelNode::publish_edges(const std::vector<Vertex>& vertices, const std_msg
     conn_mk_pub_->publish(edges_msg);
 }
 
-void GSkelNode::publish_sparse_cloud(pcl::PointCloud<pcl::PointXYZ>::Ptr& scloud, const std_msgs::msg::Header& src_header) {
-    if (!scloud) return;
-    scloud->width  = scloud->points.size();
-    scloud->height = 1;
-    scloud->is_dense = true;
-
-    sensor_msgs::msg::PointCloud2 msg;
-    pcl::toROSMsg(*scloud, msg);
-    msg.header = src_header;
-    if (msg.header.frame_id.empty()) msg.header.frame_id = global_frame_id_;
-    if (msg.header.stamp.sec == 0 && msg.header.stamp.nanosec == 0) {
-        msg.header.stamp = this->get_clock()->now();
-    }
-    sparse_cloud_pub_->publish(msg);
-}
-
 
 void GSkelNode::process_tick() {
     sensor_msgs::msg::PointCloud2::ConstSharedPtr msg;
@@ -308,8 +283,6 @@ void GSkelNode::process_tick() {
     publish_gskel(global_skeleton, hdr);
     publish_gvert(gskel_->output_vertices(), hdr);
     publish_edges(gskel_->output_vertices(), hdr);
-
-    // publish_sparse_cloud(gskel_->output_sparse_cloud(), hdr);
 }
 
 rclcpp::Time GSkelNode::tf_safe_stamp(const std::string& target, const std::string& source) {
