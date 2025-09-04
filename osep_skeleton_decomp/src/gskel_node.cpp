@@ -8,6 +8,7 @@ TODO: Publish branch segments ??
 */
 
 #include "gskel.hpp"
+
 #include <mutex>
 #include <rclcpp/rclcpp.hpp>
 #include <tf2_ros/buffer.h>
@@ -35,6 +36,7 @@ private:
     void publish_gskel(pcl::PointCloud<pcl::PointXYZ>::Ptr& gskel_out, const std_msgs::msg::Header& src_header);
     void publish_gvert(const std::vector<Vertex>& vertices, const std_msgs::msg::Header& src_header);
     void publish_edges(const std::vector<Vertex>& vertices, const std_msgs::msg::Header& src_header);
+
     rclcpp::Time tf_safe_stamp(const std::string& target, const std::string& source);
 
     /* ROS2 */
@@ -52,6 +54,8 @@ private:
     std::string gskel_topic_;
     std::string gvert_topic_;
     std::string edge_topic_;
+    std::string sparse_cloud_topic_;
+
     std::string global_frame_id_;
     int tick_ms_;
     
@@ -61,6 +65,7 @@ private:
     
     /* Data */
     GSkelConfig gskel_cfg;
+
     sensor_msgs::msg::PointCloud2::ConstSharedPtr latest_msg_;
     pcl::PointCloud<pcl::PointXYZ>::Ptr global_skeleton;
 };
@@ -76,8 +81,8 @@ GSkelNode::GSkelNode() : Node("GSkelNode") {
     global_frame_id_ = declare_parameter<std::string>("global_frame_id", "odom");
     // GSKEL
     gskel_cfg.gnd_th = declare_parameter<float>("gskel_gnd_th", 60.0f);
-    gskel_cfg.fuse_dist_th = declare_parameter<float>("gskel_fuse_dist_th", 3.0f);
-    gskel_cfg.fuse_conf_th = declare_parameter<float>("gskel_fuse_conf_th", 0.05f);
+    gskel_cfg.fuse_dist_th = declare_parameter<float>("gskel_fuse_dist_th", 5.0f);
+    gskel_cfg.fuse_conf_th = declare_parameter<float>("gskel_fuse_conf_th", 0.5f);
     gskel_cfg.lkf_pn = declare_parameter<float>("gskel_lkf_pn", 0.0001f);
     gskel_cfg.lkf_mn = declare_parameter<float>("gskel_lkf_mn", 0.1f);
     gskel_cfg.max_obs_wo_conf = declare_parameter<int>("gskel_max_obs_wo_conf", 5);
@@ -151,7 +156,7 @@ void GSkelNode::publish_gvert(const std::vector<Vertex>& vertices, const std_msg
     for (size_t i=0; i<vertices.size(); ++i) {
         const auto& v = vertices[i];
         MsgVertex v_msg;
-        v_msg.id = v.vid;
+        v_msg.id = v.vid; // unique vertex id
         v_msg.position.x = v.position.x;
         v_msg.position.y = v.position.y;
         v_msg.position.z = v.position.z;
@@ -159,7 +164,7 @@ void GSkelNode::publish_gvert(const std::vector<Vertex>& vertices, const std_msg
         v_msg.pos_update = v.pos_update;
         v_msg.type_update = v.type_update;
         for (int nid : v.nb_ids) {
-            v_msg.adj.push_back(nid);
+            v_msg.adj.push_back(nid); // obs unique vertex ids aswell
         }
         if (v.pos_update || v.type_update) {
             v_msg.last_update = this->get_clock()->now();
@@ -170,12 +175,18 @@ void GSkelNode::publish_gvert(const std::vector<Vertex>& vertices, const std_msg
 }
 
 void GSkelNode::publish_edges(const std::vector<Vertex>& vertices, const std_msgs::msg::Header& src_header) {
+    std::unordered_map<int,int> vid2idx;
+    vid2idx.reserve(vertices.size());
+    for (int i=0; i<(int)vertices.size(); ++i) vid2idx[vertices[i].vid] = i;
+
     visualization_msgs::msg::Marker edges_msg;
     edges_msg.header = src_header;
     if (edges_msg.header.frame_id.empty()) edges_msg.header.frame_id = global_frame_id_;
     if (edges_msg.header.stamp.sec == 0 && edges_msg.header.stamp.nanosec == 0) {
         edges_msg.header.stamp = this->get_clock()->now();
     }
+    edges_msg.ns = "dense_edges";
+    edges_msg.id = 0;
     edges_msg.type = visualization_msgs::msg::Marker::LINE_LIST;
     edges_msg.action = visualization_msgs::msg::Marker::ADD;
     edges_msg.pose.orientation.w = 1.0;
@@ -188,8 +199,11 @@ void GSkelNode::publish_edges(const std::vector<Vertex>& vertices, const std_msg
     geometry_msgs::msg::Point p1, p2;
     for (const auto& v : vertices) {
         const auto& nbs = v.nb_ids;
-        for (int nb : nbs) {
-            const auto& nb_v = vertices[nb];
+        for (int nb_vid : nbs) {
+            auto it = vid2idx.find(nb_vid);
+            if (it == vid2idx.end()) continue;
+            const auto& nb_v = vertices[it->second];
+
             if (v.vid < nb_v.vid) {
                 p1.x = v.position.x;
                 p1.y = v.position.y;
@@ -205,6 +219,7 @@ void GSkelNode::publish_edges(const std::vector<Vertex>& vertices, const std_msg
 
     conn_mk_pub_->publish(edges_msg);
 }
+
 
 void GSkelNode::process_tick() {
     sensor_msgs::msg::PointCloud2::ConstSharedPtr msg;
@@ -264,6 +279,7 @@ void GSkelNode::process_tick() {
     else {
         hdr.stamp = tf_safe_stamp("lidar", global_frame_id_);
     }
+
     publish_gskel(global_skeleton, hdr);
     publish_gvert(gskel_->output_vertices(), hdr);
     publish_edges(gskel_->output_vertices(), hdr);

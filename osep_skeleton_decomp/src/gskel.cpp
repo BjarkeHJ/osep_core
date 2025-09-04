@@ -18,7 +18,6 @@ GSkel::GSkel(const GSkelConfig& cfg) : cfg_(cfg) {
     GD.new_cands.reset(new pcl::PointCloud<pcl::PointXYZ>);
     GD.global_vers_cloud.reset(new pcl::PointCloud<pcl::PointXYZ>);
     GD.global_vers_cloud->points.reserve(10000);
-    
     running = 1;
 }
 
@@ -31,11 +30,12 @@ bool GSkel::gskel_run() {
     RUN_STEP(vertex_merge);
     RUN_STEP(prune);
     RUN_STEP(smooth_vertex_positions);
+    RUN_STEP(vid_manager);
 
     // Keep small fusing distance -> Downsample to get sparser skeleton???
 
-    // RUN_STEP(extract_branches);
-    RUN_STEP(vid_manager);
+    running = 1;
+
     // auto te = std::chrono::high_resolution_clock::now();
     // auto telaps = std::chrono::duration_cast<std::chrono::milliseconds>(te-ts).count();
     // std::cout << "[GSKEL] Time Elapsed: " << telaps << " ms" << std::endl;
@@ -193,7 +193,6 @@ bool GSkel::graph_adj() {
     std::vector<std::vector<int>> new_adj(GD.global_vers_cloud->points.size());
     kd_tree_->setInputCloud(GD.global_vers_cloud);
     const int K = 10;
-    // const float max_dist_th = 2.5f * cfg_.fuse_dist_th;
     const float max_dist_th = 3.0f * cfg_.fuse_dist_th;
 
     std::vector<int> indices;
@@ -335,7 +334,6 @@ bool GSkel::vertex_merge() {
     }
 
     GD.gskel_size = GD.global_vers.size();
-    // graph_decomp();
     return size_assert();
 }
 
@@ -373,7 +371,6 @@ bool GSkel::prune() {
         }
     }
     GD.gskel_size = GD.global_vers.size();
-    // graph_decomp();
     return 1;
 }
 
@@ -414,6 +411,7 @@ bool GSkel::smooth_vertex_positions() {
 }
 
 bool GSkel::vid_manager() {
+    // If vertex in global_vers does not have a unique vid (new vertex) -> Assign one
     for (int idx : GD.new_vers_indxs) {
         if (idx < 0 || idx >= (int)GD.global_vers.size()) continue;
         auto &v = GD.global_vers[idx];
@@ -422,18 +420,31 @@ bool GSkel::vid_manager() {
         }
     }
 
+    rebuild_vid_index_map();
+
     for (size_t idx=0; idx<GD.gskel_size; ++idx) {
         auto& v = GD.global_vers[idx];
-        const auto& nbrs = GD.global_adj[idx];
+        const auto& nbrs_idx = GD.global_adj[idx];
         v.nb_ids.clear();
-        for (int nb : nbrs) {
-            v.nb_ids.push_back(nb);
+        v.nb_ids.reserve(nbrs_idx.size());
+        for (int nb_idx : nbrs_idx) {
+            if (nb_idx < 0 || nb_idx >= static_cast<int>(GD.global_vers.size())) continue;
+            const int nb_vid = GD.global_vers[nb_idx].vid;
+            if (nb_vid >= 0) {
+                v.nb_ids.push_back(nb_vid);
+            }
         }
+        
+        // dedupe just in case
+        std::sort(v.nb_ids.begin(), v.nb_ids.end());
+        v.nb_ids.erase(std::unique(v.nb_ids.begin(), v.nb_ids.end()), v.nb_ids.end());
     }
+
     graph_decomp();
     build_cloud_from_vertices(); // To publish correct cloud 
     return 1;
 }
+
 
 /* Helpers */
 void GSkel::build_cloud_from_vertices() {
@@ -452,6 +463,17 @@ void GSkel::build_cloud_from_vertices() {
 
     if (GD.global_vers.size() != GD.global_vers_cloud->points.size()) {
         std::cout << "NOT SAME SIZE???" << std::endl;
+    }
+}
+
+void GSkel::rebuild_vid_index_map() {
+    GD.vid2idx.clear();
+    GD.vid2idx.reserve(GD.global_vers.size());
+    for (int i=0; i<static_cast<int>(GD.global_vers.size()); ++i) {
+        const int vid = GD.global_vers[i].vid;
+        if (vid >= 0) {
+            GD.vid2idx[vid] = i;
+        }
     }
 }
 
@@ -519,3 +541,4 @@ bool GSkel::size_assert() {
     const bool ok = (A == B) && (B == C);
     return ok;
 }
+

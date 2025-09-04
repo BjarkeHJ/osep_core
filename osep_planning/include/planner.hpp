@@ -22,20 +22,20 @@
 
 
 struct PlannerConfig {
+    float graph_radius;
     float map_voxel_size;
-    
+    float safe_dist;
+
     // RHO params
-    float budget = 60.0f;          // max travel cost for this horizon (meters or edge cost units)
+    float budget = 1000.0f;          // max travel cost for this horizon (meters or edge cost units)
     float lambda = 1.0f;           // travel-vs-reward trade-off
-    // float subgraph_radius = 40.0f; // BFS radius from current node (cost sum)
-    float subgraph_radius = 40.0f; // BFS radius from current node (cost sum)
-    // int   subgraph_max_nodes = 200;
-    int   subgraph_max_nodes = 20;
+    float subgraph_radius = 200.0f; // dijkstra radius cutoff
+    int   subgraph_max_nodes = 50;
     float hysteresis = 0.15f;      // replan only if new_score > old*(1+hysteresis)
     int   warm_steps = 1;          // how many first steps to commit before re-planning
 
-    float geometric_bias = 0.0f;   // optional: add cost penalty for geometric edges
-    float topo_bonus = 0.0f;       // optional: subtract cost on topological edges
+    float geometric_bias = 1.0f;   // optional: add cost penalty for geometric edges
+    float topo_bonus = 10.0f;       // optional: subtract cost on topological edges
 };
 
 struct DronePose {
@@ -78,6 +78,7 @@ public:
     const std::vector<Viewpoint>& current_path() { return PD.path_out; }
 
     bool get_next_target(Viewpoint& out);
+    bool get_next_k_targets(std::vector<Viewpoint>& out_k, int k);
     bool get_start(Viewpoint& out);
     bool notify_reached(std::vector<Vertex>& gskel);
 
@@ -88,16 +89,14 @@ private:
     bool set_path(std::vector<Vertex>& gskel);
 
     /* Helper */
-    bool line_of_sight(const Eigen::Vector3f& a, const Eigen::Vector3f& b);
     int pick_start_gid_near_drone();
-    std::vector<int> build_subgraph(int start_gid);
-    float edge_cost(const GraphEdge& e);
+    std::vector<int> build_subgraph(int start_gid, std::vector<char>& allow_transit);
+    std::vector<int> greedy_plan(int start_gid, const std::vector<int>& cand, const std::vector<char>& allow_transit, float budget_left);
+
+    void dijkstra(const std::vector<char>& allow, int s, std::vector<float>& dist, std::vector<int>& parent, const float radius=std::numeric_limits<float>::infinity());
+    bool line_of_sight(const Eigen::Vector3f& a, const Eigen::Vector3f& b);
+    float edge_cost(GraphEdge& e);
     float node_reward(const GraphNode& n);
-    void compute_apsp(const std::vector<int>& cand, std::vector<std::vector<float>>& D, std::vector<std::vector<int>>& parent);
-    void dijkstra(const std::vector<char>& allow, int s, std::vector<float>& dist, std::vector<int>& parent);
-    std::vector<int> greedy_orienteering(const std::vector<int>& cand, int start_gid, const std::vector<std::vector<float>>& D);
-    void two_opt_improve(std::vector<int>& order, const std::vector<std::vector<float>>& D, const std::unordered_map<int,int>& loc);
-    std::vector<int> expand_to_graph_path(const std::vector<int>& order, const std::vector<int>& cand, const std::vector<std::vector<int>>& parent);
 
     bool mark_visited_in_skeleton(uint64_t hid, std::vector<Vertex>& gskel);
     
@@ -108,8 +107,8 @@ private:
     std::shared_ptr<pcl::octree::OctreePointCloudSearch<pcl::PointXYZ>> octree_;
     std::unordered_map<int,int> gskel_vid2idx;
     
-    pcl::KdTreeFLANN<pcl::PointXYZ> vpt_kdtree; // remove again?
-    pcl::PointCloud<pcl::PointXYZ>::Ptr vpt_cloud; // remove again?
+    pcl::KdTreeFLANN<pcl::PointXYZ> vpt_kdtree;
+    pcl::PointCloud<pcl::PointXYZ>::Ptr vpt_cloud;
     
     
     PlannerConfig cfg_;
@@ -117,7 +116,6 @@ private:
     
     bool running;
     bool plan_path = false;
-
 };
 
 

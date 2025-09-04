@@ -7,7 +7,7 @@
 #include <chrono>
 #include <algorithm>
 #include <set>
-#include <unordered_set>
+#include <unordered_map>
 #include <pcl/common/common.h>
 #include <pcl/common/point_tests.h>
 #include <pcl/search/kdtree.h>
@@ -33,6 +33,7 @@ struct GSkelConfig {
     float vertex_smooth_coef;
     int min_branch_length;
 };
+
 
 struct Edge {
     int u, v; // vertex idxs of the edge
@@ -69,7 +70,6 @@ struct UnionFind {
     }
 };
 
-
 struct Vertex {
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
     int vid = -1;
@@ -105,6 +105,8 @@ struct GSkelData {
 
     int next_vid = 0;
     size_t gskel_size;
+
+    std::unordered_map<int,int> vid2idx;
 };
 
 class GSkel {
@@ -115,23 +117,23 @@ public:
     pcl::PointCloud<pcl::PointXYZ>& input_vertices() { return *GD.new_cands; }
     pcl::PointCloud<pcl::PointXYZ>::Ptr& output_cloud() { return GD.global_vers_cloud; }
     std::vector<Vertex>& output_vertices() { return GD.global_vers; }
-
+    
 private:
-    /* Functions */
+    /* Dense Pipeline Functions */
     bool increment_skeleton();
     bool graph_adj();
     bool mst();
     bool vertex_merge();
     bool prune();
     bool smooth_vertex_positions();
-    bool vid_manager();    
-    
-    /* Helper */
+    bool vid_manager();        
+    /* Helper - Dense */
     void build_cloud_from_vertices();
     void graph_decomp();
     void merge_into(int keep, int del);
     bool size_assert();
-
+    void rebuild_vid_index_map();
+    
     GSkelConfig cfg_;
     bool running;
 

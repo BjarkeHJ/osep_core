@@ -41,7 +41,7 @@ static inline float d2(const Eigen::Vector3f& a, const Eigen::Vector3f& b) {
 }
 
 // add undirected edge if not present
-static inline void add_edge(Graph& G, int u, int v, float w, std::unordered_set<uint64_t>& edge_set, bool topo=true) {
+static inline void add_edge(Graph& G, int u, int v, float w, std::unordered_set<uint64_t>& edge_set, bool topo) {
     if (u == v) return;
     uint64_t k = ek(u, v);
     if (edge_set.insert(k).second) {
@@ -49,17 +49,5 @@ static inline void add_edge(Graph& G, int u, int v, float w, std::unordered_set<
         G.adj[v].push_back({u, w, topo});
     }
 }
-
-struct DSU {
-    std::vector<int> p, r;
-    explicit DSU(int n): p(n), r(n,0) { std::iota(p.begin(), p.end(), 0); }
-    int f(int x){ return p[x]==x?x:p[x]=f(p[x]); }
-    bool uni(int a,int b){
-        a=f(a); b=f(b); if(a==b) return false;
-        if(r[a]<r[b]) std::swap(a,b);
-        p[b]=a; if(r[a]==r[b]) r[a]++;
-        return true;
-    }
-};
 
 #endif // GRAPH_HPP_

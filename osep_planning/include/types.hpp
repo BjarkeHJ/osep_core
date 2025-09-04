@@ -14,8 +14,8 @@ struct Viewpoint {
     int target_vid = -1; // corresponding vertex id
     int target_vp_pos = -1; // index of corresponding vertex vpts vector
 
-    // float score = 0.0f;
-    float score = 100.0f; // set to zero again later
+    float score = 0.0f;
+    // float score = 100.0f; // set to zero again later
     
     bool updated = false;
     bool invalid = false;
