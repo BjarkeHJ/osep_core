@@ -206,17 +206,23 @@ bool PathPlanner::rh_plan_tick() {
 
     std::cout << "Nodes in subgraph: " << cand.size() << std::endl;
 
-    float tick_budget = 10000; // maybe remove again...
+    float tick_budget = 50; // maybe remove again...
     auto exec_gids = greedy_plan(start_gid, cand, allow_transit, tick_budget);
+
+    if (exec_gids.empty()) {
+        PD.rhs.exec_path_ids.clear();
+        PD.rhs.next_target_id = 0ull;
+        return 0;
+    }
 
     std::cout << "Executable Viewpoints: " << exec_gids.size() << std::endl;
 
     // subgraph -> global graph mapping
-    std::unordered_map<int,int> loc;
-    loc.reserve(cand.size() * 2);
-    for (int i=0; i<static_cast<int>(cand.size()); ++i) {
-        loc[cand[i]] = i;
-    }
+    // std::unordered_map<int,int> loc;
+    // loc.reserve(cand.size() * 2);
+    // for (int i=0; i<static_cast<int>(cand.size()); ++i) {
+    //     loc[cand[i]] = i;
+    // }
 
     // reward and cost
     float rew = 0.0f;
@@ -230,15 +236,13 @@ bool PathPlanner::rh_plan_tick() {
     for (int g : exec_gids) {
         uint64_t vptid = PD.g2h[g];
         if (vptid == 0ull) continue;
-        if (PD.rhs.visited.count(vptid)) continue;
+        // if (PD.rhs.visited.count(vptid)) continue;
         PD.rhs.exec_path_ids.push_back(vptid);
     }
 
     PD.rhs.last_plan_score = rew;
     PD.rhs.next_target_id = PD.rhs.exec_path_ids.front();
     return 1;
-
-
 }
 
 bool PathPlanner::set_path(std::vector<Vertex>& gskel) {
@@ -382,10 +386,12 @@ std::vector<int> PathPlanner::greedy_plan(int start_gid, const std::vector<int>&
     const int N = static_cast<int>(PD.graph.nodes.size());
     if (cand.empty() || budget_left <= 0.0f || N == 0 || start_gid < 0 || start_gid >= N) return exec;
     
-    std::vector<char> picked(PD.graph.nodes.size(), 0);
+    std::vector<char> picked(N, 0);
     int cur = start_gid;
 
     while (budget_left > 0.0f) {
+        if (!allow_transit[cur]) break;
+
         std::vector<float> dist;
         std::vector<int> parent;
         dijkstra(allow_transit, cur, dist, parent, std::numeric_limits<float>::infinity());
@@ -395,14 +401,16 @@ std::vector<int> PathPlanner::greedy_plan(int start_gid, const std::vector<int>&
         float best_travel = 0.0f;
 
         for (int g : cand) {
-            if(g < 0 || g <= N) continue;
+            if (g < 0 || g <= N) continue;
             if (g == cur) continue;
+            if (picked[g]) continue;
 
+            // uint64_t hid = PD.g2h[g];
+            // if (hid == 0ull) continue;
+            // if (PD.rhs.visited.count(hid)) continue;
 
-            if (picked[g]) continue; // already picked this tick
-            
             // cost
-            float C = (g >= 0 && g < static_cast<int>(dist.size())) ? dist[g] : std::numeric_limits<float>::infinity();
+            float C = (g < static_cast<int>(dist.size())) ? dist[g] : std::numeric_limits<float>::infinity();
             if (!std::isfinite(C)) continue; // unreachable within subgraph
 
             // gain
