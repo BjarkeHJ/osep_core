@@ -81,6 +81,7 @@ GSkelNode::GSkelNode() : Node("GSkelNode") {
     global_frame_id_ = declare_parameter<std::string>("global_frame_id", "odom");
     // GSKEL
     gskel_cfg.gnd_th = declare_parameter<float>("gskel_gnd_th", 60.0f);
+    
     // gskel_cfg.fuse_dist_th = declare_parameter<float>("gskel_fuse_dist_th", 5.0f);
     // gskel_cfg.fuse_conf_th = declare_parameter<float>("gskel_fuse_conf_th", 0.5f);
     gskel_cfg.fuse_dist_th = declare_parameter<float>("gskel_fuse_dist_th", 1.0f);
