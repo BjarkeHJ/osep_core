@@ -753,8 +753,8 @@ bool GSkel::resample_skeleton() {
         }
 
         // simplify + adaptive resampling
-        // auto simp = rdp3D(poly, eps_rdp);
-        auto simp = poly;
+        auto simp = rdp3D(poly, eps_rdp);
+        // auto simp = poly;
         auto samp = adaptive_resampling(simp, dmin, dmax, beta);
         if (samp.size() < 2) continue;
 
