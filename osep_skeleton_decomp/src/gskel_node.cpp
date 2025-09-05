@@ -84,15 +84,16 @@ GSkelNode::GSkelNode() : Node("GSkelNode") {
     
     // gskel_cfg.fuse_dist_th = declare_parameter<float>("gskel_fuse_dist_th", 5.0f);
     // gskel_cfg.fuse_conf_th = declare_parameter<float>("gskel_fuse_conf_th", 0.5f);
+
     gskel_cfg.fuse_dist_th = declare_parameter<float>("gskel_fuse_dist_th", 1.0f);
-    gskel_cfg.fuse_conf_th = declare_parameter<float>("gskel_fuse_conf_th", 0.05f);
+    gskel_cfg.fuse_conf_th = declare_parameter<float>("gskel_fuse_conf_th", 0.5f);
 
     gskel_cfg.lkf_pn = declare_parameter<float>("gskel_lkf_pn", 0.0001f);
     gskel_cfg.lkf_mn = declare_parameter<float>("gskel_lkf_mn", 0.1f);
     gskel_cfg.max_obs_wo_conf = declare_parameter<int>("gskel_max_obs_wo_conf", 5);
     gskel_cfg.niter_smooth_vertex = declare_parameter<int>("gskel_niter_vertex_smooth", 3);
     gskel_cfg.vertex_smooth_coef = declare_parameter<float>("gskel_vertex_smooth_coef", 0.3f);
-    gskel_cfg.min_branch_length = declare_parameter<int>("gskel_min_branch_length", 5);
+    gskel_cfg.min_branch_length = declare_parameter<int>("gskel_min_branch_length", 2);
 
     /* OBJECT INITIALIZATION */
     gskel_ = std::make_unique<GSkel>(gskel_cfg);
@@ -223,7 +224,6 @@ void GSkelNode::publish_edges(const std::vector<Vertex>& vertices, const std_msg
 
     conn_mk_pub_->publish(edges_msg);
 }
-
 
 void GSkelNode::process_tick() {
     sensor_msgs::msg::PointCloud2::ConstSharedPtr msg;
