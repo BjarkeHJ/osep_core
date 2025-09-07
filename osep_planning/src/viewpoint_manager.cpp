@@ -19,6 +19,9 @@ ViewpointManager::ViewpointManager(const ViewpointConfig& cfg) : cfg_(cfg) {
 
 bool ViewpointManager::update_viewpoints(std::vector<Vertex>& gskel) {
     /* Main public function */
+
+    std::cout << "[VPMAN] GSkel Size: " << gskel.size() << std::endl;
+
     running = sample_viewpoints(gskel);
     running = filter_viewpoints(gskel);
 
@@ -38,16 +41,16 @@ bool ViewpointManager::sample_viewpoints(std::vector<Vertex>& gskel) {
 
     for (int i=0; i<static_cast<int>(gskel.size()); ++i) {
         Vertex& v = gskel[i];
-        if (v.vid != i) std::cout << "WARNING: VID DOES NOT MATCH SKEL INDEX" << std::endl;
+        // if (v.vid != i) std::cout << "WARNING: VID DOES NOT MATCH SKEL INDEX" << std::endl;
         
-        // const bool need_resample = v.type_update || v.pos_update || v.vpts.empty();
-        if (v.type_update) {
-            // update viewpoints
+        const bool need_resample = v.type_update || v.pos_update || v.vpts.empty();
+        // if (v.type_update) {
+        //     // update viewpoints
 
-            continue;
-        }
+        //     continue;
+        // }
 
-        const bool need_resample = v.type_update || v.vpts.empty();
+        // const bool need_resample = v.type_update || v.vpts.empty();
         if (!need_resample) continue;
 
         std::vector<Viewpoint> new_vpts = generate_viewpoints(gskel, v);
@@ -401,6 +404,7 @@ TODO:
 - Vertex visitation (no more viewpoints...?)
 
 
+- In sampling: Dont sample a viewpoint close to another...
 
 */
 

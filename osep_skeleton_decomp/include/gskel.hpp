@@ -134,9 +134,11 @@ public:
     explicit GSkel(const GSkelConfig& cfg);
     bool gskel_run();
     pcl::PointCloud<pcl::PointXYZ>& input_vertices() { return *GD.new_cands; }
-    // pcl::PointCloud<pcl::PointXYZ>::Ptr& output_cloud() { return GD.global_vers_cloud; }
-    pcl::PointCloud<pcl::PointXYZ>::Ptr& output_cloud() { return GD.sparse_cloud; }
+    pcl::PointCloud<pcl::PointXYZ>::Ptr& output_cloud() { return GD.global_vers_cloud; }
     std::vector<Vertex>& output_vertices() { return GD.global_vers; }
+    
+    pcl::PointCloud<pcl::PointXYZ>::Ptr& output_sparse_cloud() { return GD.sparse_cloud; }
+    std::vector<SparseVertex>& output_sparse_vertices() { return GD.sparse_vers; }
     
 private:
     /* Functions */

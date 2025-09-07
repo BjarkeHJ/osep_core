@@ -24,6 +24,8 @@ GSkel::GSkel(const GSkelConfig& cfg) : cfg_(cfg) {
 
 bool GSkel::gskel_run() {
     // RUN_STEP(increment_skeleton);
+    if (GD.new_cands->empty()) return 1;
+
     RUN_STEP(new_increment_skeleton);
     RUN_STEP(graph_adj);
     RUN_STEP(mst);
@@ -32,9 +34,6 @@ bool GSkel::gskel_run() {
     RUN_STEP(smooth_vertex_positions);
     RUN_STEP(vid_manager);
     RUN_STEP(resample_skeleton); // try removing 
-
-    std::cout << "GSkel size: " << GD.gskel_size << std::endl;
-    std::cout << "Sparse Skel size: " << GD.sparse_cloud->points.size() << std::endl;
 
     running = 1;
     return running;
@@ -650,7 +649,7 @@ bool GSkel::resample_skeleton() {
 
     const float fuse        = cfg_.fuse_dist_th;
     const float eps_rdp     = 0.75f * fuse;       // RDP tolerance
-    const float dmin        = 3.0f * fuse;       // min spacing on curves
+    const float dmin        = 5.0f * fuse;       // min spacing on curves
     const float dmax        = 8.0f * fuse;       // spacing on straights
 
     const float beta        = 3.0f;               // curvature sensitivity
@@ -753,8 +752,8 @@ bool GSkel::resample_skeleton() {
         }
 
         // simplify + adaptive resampling
-        auto simp = rdp3D(poly, eps_rdp);
-        // auto simp = poly;
+        // auto simp = rdp3D(poly, eps_rdp);
+        auto simp = poly;
         auto samp = adaptive_resampling(simp, dmin, dmax, beta);
         if (samp.size() < 2) continue;
 
@@ -1015,7 +1014,10 @@ bool GSkel::extract_branches() {
 
 
     auto ek = [](int a, int b)->uint64_t {
-        if (a>b) std::swap(a,b); return (uint64_t(a)<<32) | uint32_t(b); 
+        if (a>b) {
+            std::swap(a,b);
+        } 
+        return (uint64_t(a)<<32) | uint32_t(b); 
     };
     
     std::unordered_set<uint64_t> used_edge;

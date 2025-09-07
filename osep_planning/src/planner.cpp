@@ -134,6 +134,11 @@ bool PathPlanner::build_graph(std::vector<Vertex>& gskel) {
             // if (!topo) continue; // only topological graph edges
 
             float w = std::sqrt(c.d2);
+            
+            // min edge length - maybe include yaw difference?
+            const float min_edge_len = 0.0f;
+            if (w < min_edge_len) continue;
+
             add_edge(G, u, c.v, w, edge_set, topo);
         }
     }
