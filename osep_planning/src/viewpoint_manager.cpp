@@ -206,6 +206,8 @@ std::vector<Viewpoint> ViewpointManager::generate_viewpoints(std::vector<Vertex>
     return out;
 }
 
+
+
 void ViewpointManager::build_local_frame(std::vector<Vertex>& gskel, Vertex& v, Eigen::Vector3f& that, Eigen::Vector3f& n1hat, Eigen::Vector3f& n2hat) {
     that  = Eigen::Vector3f::UnitX();
     n1hat = Eigen::Vector3f::UnitY();
@@ -393,7 +395,6 @@ TODO:
 - In viewpoint_sampling i resample if pos_update=true - I DONT WANT THIS
     - Instead adjust the viewpoints accordingly using the same sampling methods. 
 
-    
 - Viewpoint Scoring based
     - Voxel novelty (viewpoint overlap instead of voxel count?)
 
@@ -402,7 +403,6 @@ TODO:
 - More viewpoints? Always circle around branch vertex -> prune roll/pitch neq ~0?
 
 - Vertex visitation (no more viewpoints...?)
-
 
 - In sampling: Dont sample a viewpoint close to another...
 
