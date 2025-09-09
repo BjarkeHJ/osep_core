@@ -318,7 +318,8 @@ bool Rosa::drosa() {
     
     /* ROSA POINT POSITION */
     // float PLANAR_TH = 0.1;
-    float PLANAR_TH = 0.0; // disable
+    // Enable planar fallback for flat surfaces
+    float PLANAR_TH = 0.2f; // tune as needed (0.05-0.15 typical)
     std::vector<int> good_ids;
     std::vector<int> poor_ids;
     std::vector<Eigen::Vector3f> goodCenters;
@@ -342,7 +343,7 @@ bool Rosa::drosa() {
 
         Eigen::Vector3f center_f;
         if (planar_score < PLANAR_TH) {
-            std::cout << "PLANAR PCA FALLBACK!" << std::endl;
+            // std::cout << "PLANAR PCA BLEND!" << std::endl;
             Eigen::Vector3f mean_p = Eigen::Vector3f::Zero();
             Eigen::Vector3f mean_n = Eigen::Vector3f::Zero();
             for (int i : active) {
@@ -355,10 +356,11 @@ bool Rosa::drosa() {
             const float inv_m = 1.0f / static_cast<float>(active.size());
             mean_p *= inv_m;
             mean_n *= inv_m;
-            // center_f = mean_p - mean_n * (0.5f * cfg_.max_proj_range);
-            center_f = mean_p - mean_n * cfg_.max_proj_range;
-        }
-        else {
+            Eigen::Vector3f fallback_center = mean_p - mean_n * cfg_.max_proj_range;
+            Eigen::Vector3f proj_center = closest_projection_point(active);
+            float blend = 0.5f; // 0.0 = only projection, 1.0 = only fallback
+            center_f = blend * fallback_center + (1.0f - blend) * proj_center;
+        } else {
             center_f = closest_projection_point(active);
         }
 
