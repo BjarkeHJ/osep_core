@@ -406,10 +406,12 @@ bool Rosa::dcrosa() {
 
     constexpr float CONVERGENCE_TH = 1e-5f;
     constexpr float TRIM_RATIO = 0.2f; // 20% farthest neighbors trimmed
+    constexpr float MAX_MOVE = 0.1f; // clamp max movement per iteration (units)
+    constexpr float GAUSS_SIGMA = 0.2f; // Gaussian sigma for weighting (units)
     for (int it = 0; it < cfg_.niter_dcrosa; ++it) {
         bool any_change = false;
         float max_delta = 0.0f;
-        // Pass 1: Robust neighborhood averaging (trimmed mean)
+        // Pass 1: Robust neighborhood averaging (weighted trimmed mean, Gaussian weights, clamped move)
         for (size_t i = 0; i < RD.pcd_size_; ++i) {
             const auto& nb = RD.simi_nbs[i];
             if (nb.empty()) {
@@ -421,7 +423,7 @@ bool Rosa::dcrosa() {
             const Eigen::Vector3f pi = pset.row(i).transpose();
             for (int j : nb) {
                 Eigen::Vector3f pj = pset.row(j).transpose();
-                float d = (pj - pi).squaredNorm();
+                float d = (pj - pi).norm();
                 dists.emplace_back(d, pj);
             }
             // Sort by distance
@@ -430,13 +432,24 @@ bool Rosa::dcrosa() {
             size_t trim = static_cast<size_t>(TRIM_RATIO * dists.size());
             size_t keep = dists.size() - trim;
             if (keep < 1) keep = 1;
-            Eigen::Vector3f acc = Eigen::Vector3f::Zero();
-            for (size_t k = 0; k < keep; ++k) acc += dists[k].second;
-            Eigen::Vector3f avg = acc / static_cast<float>(keep);
-            float delta = (avg - pi).norm();
+            // Weighted mean (Gaussian)
+            double wsum = 0.0;
+            Eigen::Vector3d acc = Eigen::Vector3d::Zero();
+            for (size_t k = 0; k < keep; ++k) {
+                double w = std::exp(-0.5 * (dists[k].first * dists[k].first) / (GAUSS_SIGMA * GAUSS_SIGMA));
+                acc += w * dists[k].second.cast<double>();
+                wsum += w;
+            }
+            Eigen::Vector3d avg = (wsum > 0.0) ? (acc / wsum) : Eigen::Vector3d(pi.x(), pi.y(), pi.z());
+            Eigen::Vector3f avgf = avg.cast<float>();
+            Eigen::Vector3f move = avgf - pi;
+            float move_norm = move.norm();
+            if (move_norm > MAX_MOVE) move = move * (MAX_MOVE / move_norm);
+            Eigen::Vector3f newp = pi + move;
+            float delta = move.norm();
             if (delta > CONVERGENCE_TH) any_change = true;
             if (delta > max_delta) max_delta = delta;
-            newpset.row(i) = avg.transpose();
+            newpset.row(i) = newp.transpose();
         }
         pset.swap(newpset);
 
