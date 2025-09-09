@@ -106,7 +106,7 @@ private:
     pcl::PointCloud<pcl::PointXYZ>::Ptr map_cloud_;
     std::shared_ptr<pcl::octree::OctreePointCloudSearch<pcl::PointXYZ>> map_octree_;
     
-    bool bootstrap_mode_ = true;
+    bool bootstrap_mode_;
     size_t bootstrap_idx_ = 0;
     std::vector<geometry_msgs::msg::PoseStamped> bootstrap_waypoints_;
 
@@ -133,6 +133,7 @@ private:
 
 PlannerNode::PlannerNode() : Node("PlannerNode") {
     /* LAUNCH FILE PARAMETER DECLARATIONS */
+    bootstrap_mode_ = declare_parameter<bool>("bootstrap_mode", true);
     tick_ms_ = declare_parameter<int>("tick_ms", 200);
     ctl_ms_ = declare_parameter<int>("control_ms", 50);
     map_voxel_size_ = declare_parameter<float>("map_voxel_size", 1.0f);
@@ -163,7 +164,7 @@ PlannerNode::PlannerNode() : Node("PlannerNode") {
     vpman_cfg.cam_max_range = 20.0f;
 
     // PATHPLANNER
-    planner_cfg.graph_radius = declare_parameter<float>("graph_radius", 15.0f);
+    planner_cfg.graph_radius = declare_parameter<float>("graph_radius", 20.0f);
     planner_cfg.safe_dist = safe_dist_;
     planner_cfg.map_voxel_size = map_voxel_size_;
 
@@ -211,10 +212,6 @@ PlannerNode::PlannerNode() : Node("PlannerNode") {
     bootstrap_waypoints_[0].pose.position.x = 0.0;
     bootstrap_waypoints_[0].pose.position.y = 0.0;
     bootstrap_waypoints_[0].pose.position.z = 80.0;
-
-    // bootstrap_waypoints_[1].pose.position.x = 100.0;
-    // bootstrap_waypoints_[1].pose.position.y = 0.0;
-    // bootstrap_waypoints_[1].pose.position.z = 120.0;
 
     bootstrap_waypoints_[1].pose.position.x = 180.0;
     bootstrap_waypoints_[1].pose.position.y = 0.0;
@@ -460,6 +457,7 @@ void PlannerNode::update_skeleton(const std::vector<Vertex>& skel_in) {
             // vin.vid not found -> new vertex
             Vertex vnew = vin; // copy new vertex
             vid2idx_[vnew.vid] = static_cast<int>(skeleton_.size());
+            vnew.spawn_vpts = true;
             skeleton_.push_back(std::move(vnew));
             continue;
         }

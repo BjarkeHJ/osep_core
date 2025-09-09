@@ -73,7 +73,7 @@ def generate_launch_description():
             name="PlannerNode",
             output="screen",
             parameters=[
-
+                {"bootstrap_mode": True}
             ]
         ),
     ])

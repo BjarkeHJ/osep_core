@@ -43,11 +43,16 @@ public:
 private:
     /* Functions */
     bool sample_viewpoints(std::vector<Vertex>& gskel);
-    bool filter_viewpoints(std::vector<Vertex>& gskel);
-    bool score_viewpoints(std::vector<Vertex>& gskel); // ??
+    bool prune_viewpoints(std::vector<Vertex>& gskel);
+
+    bool score_viewpoints(std::vector<Vertex>& gskel);
 
     /* Helpers */
+    std::vector<Viewpoint> new_generate_viewpoints(std::vector<Vertex>& gskel, Vertex& v);
+    void collect_visible_hits(const Viewpoint& vp, std::vector<uint64_t>& out_keys);
+
     std::vector<Viewpoint> generate_viewpoints(std::vector<Vertex>& gskel, Vertex& v);
+    
     void build_local_frame(std::vector<Vertex>& gskel, Vertex& v, Eigen::Vector3f& that, Eigen::Vector3f& n1hat, Eigen::Vector3f& n2hat);
     float distance_to_free_space(const Eigen::Vector3f& p_in, const Eigen::Vector3f dir_in);
     
@@ -74,12 +79,10 @@ private:
         std::vector<int> ids; std::vector<float> d2s; pcl::PointXYZ qp(p.x(), p.y(), p.z());
         return octree_->radiusSearch(qp, cfg_.vpt_safe_dist, ids, d2s) > 0;
     }
-
     /* For giving viewpoints unique handle ids for downs stream synchronization - packs vertex ID and unique viewpoint id into key*/
     static inline uint64_t make_vpt_handle(int vid, uint32_t seq) {
         return ( (uint64_t(uint32_t(vid)) << 32) | uint64_t(seq));
     }
-
     /* For map key hashing */
     inline uint64_t grid_key(const Eigen::Vector3f& p, float S) {
         int ix = static_cast<int>(std::floor(p.x() / S));
@@ -90,7 +93,6 @@ private:
              | ( (uint64_t(uint32_t(iy)) & 0x1FFFFF) << 21 )
              | (  uint64_t(uint32_t(iz)) & 0x1FFFFF );
     }
-    
     
     std::unordered_map<int, uint32_t> per_vertex_seg; // vid -> seq counter
 

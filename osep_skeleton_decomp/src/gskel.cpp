@@ -33,7 +33,7 @@ bool GSkel::gskel_run() {
     RUN_STEP(prune);
     RUN_STEP(smooth_vertex_positions);
     RUN_STEP(vid_manager);
-    RUN_STEP(resample_skeleton); // try removing 
+    RUN_STEP(resample_skeleton);
 
     running = 1;
     return running;
@@ -382,7 +382,6 @@ bool GSkel::increment_skeleton() {
     else return 1;
 }
 
-
 bool GSkel::graph_adj() {
     if (!GD.global_vers_cloud) return 0;
 
@@ -659,15 +658,6 @@ bool GSkel::resample_skeleton() {
 
     if (!extract_branches()) return false; // fill GD.branches
 
-    std::size_t nodes_total = GD.global_vers.size();
-    std::size_t branches_cnt = GD.branches.size();
-    std::size_t branch_nodes = 0;
-    for (auto& b : GD.branches) branch_nodes += b.size();
-
-    std::cout << "[resample] dense nodes=" << nodes_total
-            << " branches=" << branches_cnt
-            << " nodes_in_branches=" << branch_nodes << std::endl;
-
     if (GD.branches.empty()) {
         // no branches -> clear sparse view
         GD.sparse_vers.clear();
@@ -742,7 +732,8 @@ bool GSkel::resample_skeleton() {
     };
 
     for (const auto& br_idx : GD.branches) {
-        if (br_idx.size() < 2) continue; 
+        // if (br_idx.size() < 2) continue; 
+        if (br_idx.size() < cfg_.min_branch_length) continue; 
 
         // build dense polyline
         std::vector<Eigen::Vector3f> poly;
@@ -841,12 +832,6 @@ bool GSkel::resample_skeleton() {
             GD.sparse_vid2idx[svid] = i;
         } 
     }
-
-    std::cout << "[resample] sparse_vers=" << GD.sparse_vers.size()
-          << " sparse_edges=" << std::accumulate(GD.sparse_adj.begin(), GD.sparse_adj.end(), 0,
-               [](int s, const auto& v){ return s + (int)v.size(); }) / 2
-          << std::endl;
-
     return 1;
 }
 
@@ -1074,50 +1059,6 @@ bool GSkel::extract_branches() {
         GD.branches.end()
     );
     return true;
-
-
-    // std::vector<char> used(N, 0);
-    // auto walk = [&](int s, int prev) -> std::vector<int> {
-    //     std::vector<int> path;
-    //     path.reserve(64);
-    //     int cur = s;
-    //     int par = prev;
-    //     while (true) {
-    //         path.push_back(cur);
-    //         used[cur] =  1;
-    //         if (cur != s && deg[cur] != 2) break; // reached leaf / joint - Will include the last leaf/joint in branch
-    //         int nxt = -1;
-    //         for (int nb : GD.global_adj[cur]) {
-    //             if (nb != par) {
-    //                 nxt = nb;
-    //                 break;
-    //             }
-    //         }
-    //         if (nxt < 0 || used[nxt]) break; // dead end or already used
-    //         par = cur;
-    //         cur = nxt;
-    //     }
-    //     return path;
-    // };
-
-    // // start walks at leafs and junctions 
-    // for (int i=0; i<N; ++i) {
-    //     if (deg[i] != 2) {
-    //         for (int nb : GD.global_adj[i]) {
-    //             if (!used[i]) {
-    //                 GD.branches.push_back(walk(i, nb)); // each branch includes the junction / leaf itself
-    //             }
-    //         }
-    //     }
-    // }
-
-    // GD.branches.erase(
-    //     std::remove_if(GD.branches.begin(), GD.branches.end(),
-    //         [&](const std::vector<int>& b){ return (int)b.size() < std::max(2, cfg_.min_branch_length); }),
-    //     GD.branches.end()
-    // );
-    
-    // return true;
 }
 
 void GSkel::rdp_impl(const std::vector<Eigen::Vector3f>& P, int a, int b, float eps, std::vector<int>& keep) {
