@@ -18,28 +18,224 @@ GSkel::GSkel(const GSkelConfig& cfg) : cfg_(cfg) {
     GD.new_cands.reset(new pcl::PointCloud<pcl::PointXYZ>);
     GD.global_vers_cloud.reset(new pcl::PointCloud<pcl::PointXYZ>);
     GD.global_vers_cloud->points.reserve(10000);
+    GD.sparse_cloud.reset(new pcl::PointCloud<pcl::PointXYZ>);
     running = 1;
 }
 
 bool GSkel::gskel_run() {
-    // auto ts = std::chrono::high_resolution_clock::now();
+    // RUN_STEP(increment_skeleton);
+    if (GD.new_cands->empty()) return 1;
 
-    RUN_STEP(increment_skeleton);
+    RUN_STEP(new_increment_skeleton);
     RUN_STEP(graph_adj);
     RUN_STEP(mst);
     RUN_STEP(vertex_merge);
     RUN_STEP(prune);
     RUN_STEP(smooth_vertex_positions);
     RUN_STEP(vid_manager);
-
-    // Keep small fusing distance -> Downsample to get sparser skeleton???
+    RUN_STEP(resample_skeleton);
 
     running = 1;
-
-    // auto te = std::chrono::high_resolution_clock::now();
-    // auto telaps = std::chrono::duration_cast<std::chrono::milliseconds>(te-ts).count();
-    // std::cout << "[GSKEL] Time Elapsed: " << telaps << " ms" << std::endl;
     return running;
+}
+
+bool GSkel::new_increment_skeleton() {
+    if (!GD.new_cands) return 0;
+
+    auto& in_cloud = *GD.new_cands;
+    if (in_cloud.empty()) {
+        build_cloud_from_vertices(); // still refresh published cloud
+        return true;
+    }
+
+    const float fuse_r  = cfg_.fuse_dist_th;
+    const float fuse_r2 = fuse_r * fuse_r;
+
+    // Tunables (derive from map voxel size if you have it)
+    const float sig_t_meas = std::max(2.0f * cfg_.lkf_mn,  1e-3f); // along branch
+    const float sig_n_meas = std::max(0.5f * cfg_.lkf_mn,  1e-4f); // across
+    const float sig_t_proc = std::max(3.0f * cfg_.lkf_pn,  1e-4f);
+    const float sig_n_proc = std::max(0.3f * cfg_.lkf_pn,  1e-5f);
+    const float gate2      = 9.0f; // ~3-sigma ellipsoidal gate
+
+    const int   min_conf_obs     = 3;   // need at least this many hits
+    const float conf_norm_trace  = cfg_.fuse_conf_th; // threshold on normal-plane covariance
+    const int   max_unconf_steps = cfg_.max_obs_wo_conf;
+
+    pcl::PointCloud<pcl::PointXYZ>::Ptr prelim_cloud(new pcl::PointCloud<pcl::PointXYZ>);
+    prelim_cloud->points.reserve(GD.prelim_vers.size());
+    for (const auto& v : GD.prelim_vers) {
+        prelim_cloud->points.push_back(v.position);
+    }
+    kd_tree_->setInputCloud(prelim_cloud);
+
+    std::vector<int> idx_buff;
+    idx_buff.reserve(32);
+    std::vector<float> dist2_buff;
+    dist2_buff.reserve(32);
+    std::vector<pcl::PointXYZ> spawned_this_tick;
+    spawned_this_tick.reserve(64);
+
+    // For each incoming ROSA point -> Fuse into global (update existing / spawn new)
+    for (const auto& pt : in_cloud.points) {
+        if (!pcl::isFinite(pt)) continue;
+
+        Eigen::Vector3f z = const_cast<pcl::PointXYZ&>(pt).getVector3fMap(); // measurement
+
+        bool any_in_radius = false;
+        bool frozen_in_radius = false;
+
+        int chosen_idx = -1;
+        float best_normal_md2 = std::numeric_limits<float>::infinity();
+
+        if (!prelim_cloud->points.empty()) {
+            idx_buff.clear();
+            dist2_buff.clear();
+
+            if (kd_tree_->radiusSearch(pt, fuse_r, idx_buff, dist2_buff) > 0) {
+                any_in_radius = true;
+
+                for (size_t k=0; k<idx_buff.size(); ++k) {
+                    const int i = idx_buff[k];
+                    if (i < 0 || i >= static_cast<int>(GD.prelim_vers.size())) continue;
+
+                    auto& gv = GD.prelim_vers[i];
+                    if (gv.frozen) {
+                        frozen_in_radius = true;
+                        continue;
+                    }
+
+                    // ensure local frame exists
+                    LocalFrame lf;
+                    {
+                        std::vector<int> nn_idx;
+                        std::vector<float> nn_d2;
+                        nn_idx.reserve(16);
+                        nn_d2.reserve(16);
+                        kd_tree_->radiusSearch(gv.position, fuse_r, nn_idx, nn_d2);
+                        lf = refineLocalFrameFromNeighbors(gv.kf.x, nn_idx, *prelim_cloud);
+                    }
+
+                    if (!lf.valid) {
+                        lf = defaultFrame();
+                    }
+
+                    // ellipsoidal gate
+                    if (!passGate(gv.kf.x, z, lf.U, sig_t_meas, sig_n_meas, gate2)) continue;
+
+                    // prefer smallest normal residual (tolerant along tangent)
+                    Eigen::Vector3f dl = lf.U.transpose() * (z - gv.kf.x);
+                    float normal_md2 = (dl.y()*dl.y() + dl.z()*dl.z()) / (sig_n_meas*sig_n_meas);
+                    if (normal_md2 < best_normal_md2) {
+                        best_normal_md2 = normal_md2;
+                        chosen_idx = i;
+                    }
+                }
+            }
+        }
+
+        //prevent multiple spawns at the spot this tick
+        auto near_spawned = [&]() {
+            for (const auto& s : spawned_this_tick) {
+                Eigen::Vector3f sv = const_cast<pcl::PointXYZ&>(s).getVector3fMap();
+                if ((sv - z).squaredNorm() < fuse_r2) return true; 
+            }
+            return false;
+        };
+
+        // Update chosen preliminary vertex with anisotropic Q/R
+        if (chosen_idx >= 0) {
+            auto& gv = GD.prelim_vers[chosen_idx];
+
+            // build a local frame at the updated state
+            std::vector<int> nn_idx;
+            std::vector<float> nn_d2;
+            kd_tree_->radiusSearch(gv.position, fuse_r, nn_idx, nn_d2);
+            LocalFrame lf = refineLocalFrameFromNeighbors(gv.kf.x, nn_idx, *prelim_cloud);
+            if (!lf.valid) {
+                lf = defaultFrame();
+            }
+
+            Eigen::Matrix3f Qw = makeAnisotropic(lf.U, sig_t_proc, sig_n_proc);
+            Eigen::Matrix3f Rw = makeAnisotropic(lf.U, sig_t_meas, sig_n_meas);
+
+            gv.kf.update(z, Qw, Rw);
+            if (!gv.kf.x.allFinite()) {
+                gv.marked_for_deletion = true;
+                continue;
+            }
+
+            gv.position.getVector3fMap() = gv.kf.x;
+            gv.obs_count++;
+            gv.pos_update = true;
+
+            // confidence check emphasizing normal-plane stability
+            float normal_trace = gv.kf.P(1,1) + gv.kf.P(2,2);
+            if (!gv.conf_check && gv.obs_count >= min_conf_obs && normal_trace < conf_norm_trace) {
+                gv.conf_check = true;
+                gv.just_approved = true; // approved this tick
+                gv.frozen = true; // publish ready
+                gv.unconf_check = 0;
+            }
+            else {
+                gv.unconf_check++;
+                if (gv.unconf_check > max_unconf_steps) {
+                    gv.marked_for_deletion = true;
+                }
+            }
+        }
+        else {
+            // no candidates passed gate
+            // if near any occupied -> skip
+            if (any_in_radius || frozen_in_radius) continue;
+            if (near_spawned()) continue;
+
+            Vertex nv;
+            nv.vid = -1;
+            nv.kf.initFrom(z, Eigen::Matrix3f::Identity()); // tune initial P?
+            nv.position.getVector3fMap() = z;
+            nv.obs_count = 1;
+            nv.smooth_iters = cfg_.niter_smooth_vertex;
+            nv.frozen = false;
+            nv.conf_check = false;
+            nv.unconf_check = 0;
+            nv.pos_update = false;
+
+            GD.prelim_vers.emplace_back(std::move(nv));
+            spawned_this_tick.push_back(pt);
+        }
+    }
+
+    // Garbarge collect: deleted marked vertices
+    GD.prelim_vers.erase(
+        std::remove_if(GD.prelim_vers.begin(), GD.prelim_vers.end(),
+            [](const Vertex& v){ return v.marked_for_deletion || !pcl::isFinite(v.position); }),
+        GD.prelim_vers.end() );
+
+    // promote just approved
+    GD.new_vers_indxs.clear();
+    GD.global_vers.reserve(GD.global_vers.size() + GD.prelim_vers.size());
+    
+    for (auto& v : GD.prelim_vers) {
+        if (!v.just_approved) continue;
+        const float zg = v.position.z;
+        if (zg <= cfg_.gnd_th) {
+            v.just_approved = false;
+            continue;
+        }
+
+        // assign stable vertex id
+        v.vid = GD.next_vid++;
+        GD.global_vers.emplace_back(v); // copy
+        GD.new_vers_indxs.push_back(static_cast<int>(GD.global_vers.size() - 1)); //maybe vid instead - but should not matter as only related to this tick
+        v.just_approved = false; // consume this flag
+    }
+
+
+    GD.gskel_size = GD.global_vers.size();
+    // build_cloud_from_vertices();
+    // rebuild_vid_index_map();
+    return 1;
 }
 
 bool GSkel::increment_skeleton() {
@@ -445,6 +641,195 @@ bool GSkel::vid_manager() {
     return 1;
 }
 
+bool GSkel::resample_skeleton() {
+    if (GD.global_vers.empty() || GD.global_adj.empty()) return true;
+    
+    graph_decomp();
+
+    const float fuse        = cfg_.fuse_dist_th;
+    const float dmin        = 5.0f * fuse;       // min spacing on curves
+    const float dmax        = 8.0f * fuse;       // spacing on straights
+
+    const float beta        = 3.0f;               // curvature sensitivity
+    const float r_match_end = 2.00f * dmin;       // capture radius for endpoints (anchors)
+    const float r_match_mid = 1.00f * dmin;       // capture radius for interior samples
+    const float ema_alpha   = 0.30f;              // EMA smoothing for matched vertices
+
+    if (!extract_branches()) return false; // fill GD.branches
+
+    if (GD.branches.empty()) {
+        // no branches -> clear sparse view
+        GD.sparse_vers.clear();
+        GD.sparse_adj.clear();
+        GD.sparse_cloud->clear();
+        GD.sparse_vid2idx.clear();
+        return true;
+    }
+
+    if (!GD.sparse_vers.empty()) {
+        GD.sparse_cloud->points.clear();
+        GD.sparse_cloud->points.reserve(GD.sparse_vers.size());
+        for (const auto& v : GD.sparse_vers) {
+            GD.sparse_cloud->points.push_back(v.position);
+        }
+        kd_tree_->setInputCloud(GD.sparse_cloud);
+    }
+
+    const bool had_prev_sparse = !GD.sparse_vers.empty();
+
+    // bookkeeping: dont reuse the same old sparse vertex twice in one tick
+    std::vector<char> prev_taken(GD.sparse_vers.size(), 0);
+
+    auto reuse_or_spawn = [&](const Eigen::Vector3f& target, bool is_endpoint) -> SparseVertex {
+        int best_idx = -1;
+        float best_d2 = std::numeric_limits<float>::infinity();
+        if (had_prev_sparse) {
+            pcl::PointXYZ q;
+            q.getVector3fMap() = target;
+            std::vector<int> ids;
+            std::vector<float> d2;
+            const float r = is_endpoint ? r_match_end : r_match_mid;
+            int found = kd_tree_->radiusSearch(q, r, ids, d2);
+            for (int k=0; k<found; ++k) {
+                const int sid = ids[k];
+                if (prev_taken[sid]) continue;
+                if (d2[k] < best_d2) {
+                    best_d2 = d2[k];
+                    best_idx = sid;
+                }
+            }
+        }
+
+        if (best_idx >= 0) {
+            // reuse old sparse vertex and smooth position
+            SparseVertex v = GD.sparse_vers[best_idx];
+            Eigen::Vector3f cur = v.position.getVector3fMap();
+            v.position.getVector3fMap() = ema_alpha * target + (1.0f - ema_alpha) * cur;
+            v.pos_update = true; // mark sparse vertex position updated
+            prev_taken[best_idx] = 1;
+            return v; // retain the original SVID
+        }
+
+        // no match -> spawn a new sparse vertex
+        SparseVertex v;
+        v.svid = GD.next_svid++; // update svid 
+        v.position.getVector3fMap() = target; // update position
+        v.pos_update = true;
+        v.type = 0;
+        return v;
+    };
+
+    // Generate resampled polylines per dense branch
+    std::vector<SparseVertex> new_sparse;
+    std::vector<std::vector<int>> new_sadj; // adjacency in index space
+    new_sparse.reserve(GD.sparse_vers.size() + GD.branches.size() * 8);
+
+    auto ensure_slot = [&](int idx) {
+        if (static_cast<int>(new_sadj.size()) <= idx) {
+            new_sadj.resize(idx+1);
+        }
+    };
+
+    for (const auto& br_idx : GD.branches) {
+        // if (br_idx.size() < 2) continue; 
+        if (br_idx.size() < cfg_.min_branch_length) continue; 
+
+        // build dense polyline
+        std::vector<Eigen::Vector3f> poly;
+        poly.reserve(br_idx.size());
+        for (int gi : br_idx) {
+            poly.push_back(GD.global_vers[gi].position.getVector3fMap());
+        }
+
+        // adaptive resampling
+        auto samp = adaptive_resampling(poly, dmin, dmax, beta);
+        if (samp.size() < 2) continue;
+
+        // emit endpoints (anchors) first then interiors 
+        SparseVertex v_head = reuse_or_spawn(samp.front(), /*is_endpoint=*/true);
+        new_sparse.push_back(std::move(v_head));
+        int prev_idx = static_cast<int>(new_sparse.size() - 1);
+        ensure_slot(prev_idx);
+
+        for (size_t t=1; t+1<samp.size(); ++t) {
+            SparseVertex v_mid = reuse_or_spawn(samp[t], /*is_endpoint*/false);
+            new_sparse.push_back(std::move(v_mid));
+            int cur_idx = static_cast<int>(new_sparse.size() - 1);
+            ensure_slot(cur_idx);
+            // connect edge
+            new_sadj[prev_idx].push_back(cur_idx);
+            new_sadj[cur_idx].push_back(prev_idx);
+            prev_idx = cur_idx;
+        }
+
+        // tail endpoint
+        SparseVertex v_tail = reuse_or_spawn(samp.back(), /*is_endpoint*/true);
+        new_sparse.push_back(std::move(v_tail));
+        int tail_idx = static_cast<int>(new_sparse.size() - 1);
+        ensure_slot(tail_idx);
+        // connect last edge
+        new_sadj[prev_idx].push_back(tail_idx);
+        new_sadj[tail_idx].push_back(prev_idx);
+    }
+
+    // dedupe neighbors
+    for (auto& nbs : new_sadj) {
+        std::sort(nbs.begin(), nbs.end());
+        nbs.erase(std::unique(nbs.begin(), nbs.end()), nbs.end());
+    }
+
+    // set type and fill nb_ids with svids
+    for (int i=0; i<static_cast<int>(new_sparse.size()); ++i) {
+        int deg = static_cast<int>(new_sadj[i].size());
+        int new_type = 0;
+        if (deg == 1) new_type = 1;
+        else if (deg == 2) new_type = 2;
+        else if (deg > 2) new_type = 3;
+
+        if (new_sparse[i].type != new_type) {
+            new_sparse[i].type_update = true;
+        }
+
+        new_sparse[i].type = new_type;
+
+        // nb svids
+        new_sparse[i].nb_ids.clear();
+        if (i < static_cast<int>(new_sadj.size())) {
+            new_sparse[i].nb_ids.reserve(new_sadj[i].size());
+            for (int j : new_sadj[i]) {
+                if ( j >= 0 && j < static_cast<int>(new_sparse.size())) {
+                    new_sparse[i].nb_ids.push_back(new_sparse[j].svid);                
+                }
+            }
+            std::sort(new_sparse[i].nb_ids.begin(), new_sparse[i].nb_ids.end());
+            new_sparse[i].nb_ids.erase(std::unique(new_sparse[i].nb_ids.begin(), new_sparse[i].nb_ids.end()), new_sparse[i].nb_ids.end()); // dedupe
+        }
+    }
+
+    GD.sparse_vers.swap(new_sparse);
+    GD.sparse_adj.swap(new_sadj);
+
+    // rebuild sparse cloud
+    GD.sparse_cloud->points.clear();
+    GD.sparse_cloud->points.reserve(GD.sparse_vers.size());
+    for (const auto& v : GD.sparse_vers) {
+        GD.sparse_cloud->points.push_back(v.position);
+    }
+    GD.sparse_cloud->width = (uint32_t)GD.sparse_cloud->points.size();
+    GD.sparse_cloud->height = 1;
+    GD.sparse_cloud->is_dense = true;
+
+    // vid map
+    GD.sparse_vid2idx.clear();
+    GD.sparse_vid2idx.reserve(GD.sparse_vers.size());
+    for (int i=0; i<static_cast<int>(GD.sparse_vers.size()); ++i) {
+        int svid = GD.sparse_vers[i].svid; // sparse vertex id
+        if (svid >= 0) {
+            GD.sparse_vid2idx[svid] = i;
+        } 
+    }
+    return 1;
+}
 
 /* Helpers */
 void GSkel::build_cloud_from_vertices() {
@@ -542,3 +927,136 @@ bool GSkel::size_assert() {
     return ok;
 }
 
+std::vector<Eigen::Vector3f> GSkel::adaptive_resampling(std::vector<Eigen::Vector3f>& poly, float dmin, float dmax, float beta) {
+    const int n = static_cast<int>(poly.size());
+    if (n == 0) return {};
+    if (n == 1) return poly;
+
+    auto curvature3 = [](const Eigen::Vector3f& a, const Eigen::Vector3f& b, const Eigen::Vector3f& c) {
+        Eigen::Vector3f ab = b - a;
+        Eigen::Vector3f bc = c - b;
+        Eigen::Vector3f ac = c - a;
+        float la = ab.norm();
+        float lb = bc.norm();
+        float lc = ac.norm();
+        float denom = la * lb * lc;
+        if (denom < 1e-6f) return 0.f;
+        float area2 = ab.cross(bc).norm(); // twice tiangle area
+        return area2 / denom; // ~1/R
+    };
+
+    auto target_d = [&](int i) -> float {
+        if (i <= 0 || i>=n-1) return dmax; // endpoints
+        float k = curvature3(poly[i-1], poly[i], poly[i+1]);
+        float d = dmax / (1.0f + beta * k);
+        return std::clamp(d, dmin, dmax);
+    };
+
+    std::vector<Eigen::Vector3f> out;
+    out.reserve(n);
+    out.push_back(poly.front());
+    float acc = 0.0f;
+
+    for (int i=1; i<n; ++i) {
+        Eigen::Vector3f seg = poly[i] - poly[i-1];
+        float segL = seg.norm();
+        if (segL < 1e-6f) continue;
+
+        float local = target_d(i-1);
+        acc += segL;
+
+        while (acc >= local) {
+            float over = acc - local;
+            float t = (segL - over) / segL;
+            out.push_back(poly[i-1] + t * seg);
+            acc = over;
+            local = target_d(i-1);
+        }
+    }
+
+    if ((out.back() - poly.back()).norm() > 1e-3f) {
+        out.push_back(poly.back());
+    }
+
+    return out;
+}
+
+bool GSkel::extract_branches() {    
+    const int N = static_cast<int>(GD.global_adj.size());
+    GD.branches.clear();
+    if (N == 0) return true;
+
+    std::vector<int> deg(N, 0);
+    for (int i=0; i<N; ++i) {
+        deg[i] = GD.global_vers[i].type;
+        // deg[i] = static_cast<int>(GD.global_adj[i].size());
+    }
+
+
+    auto ek = [](int a, int b)->uint64_t {
+        if (a>b) {
+            std::swap(a,b);
+        } 
+        return (uint64_t(a)<<32) | uint32_t(b); 
+    };
+    
+    std::unordered_set<uint64_t> used_edge;
+    used_edge.reserve(N * 4);
+
+    auto walk = [&](int s, int nb) -> std::vector<int> {
+        std::vector<int> path;
+        path.reserve(32);
+
+        // seed edge
+        used_edge.insert(ek(s, nb));
+        int prev = s;
+        int cur  = nb;
+
+        path.push_back(s);
+        path.push_back(cur);
+
+        // follow degree-2 chain until endpoint (deg!=2) or we hit an already-used edge
+        while (deg[cur] == 2) {
+            int nxt = -1;
+            for (int w : GD.global_adj[cur]) {
+                if (w != prev) { nxt = w; break; }
+            }
+            if (nxt < 0) break;
+            auto key = ek(cur, nxt);
+            if (used_edge.count(key)) break;
+            used_edge.insert(key);
+
+            prev = cur;
+            cur  = nxt;
+            path.push_back(cur);
+        }
+        return path;
+    };
+
+    for (int i = 0; i < N; ++i) {
+        if (deg[i] == 0) continue;
+        if (deg[i] != 2) {
+            for (int nb : GD.global_adj[i]) {
+                auto key = ek(i, nb);
+                if (used_edge.count(key)) continue;
+                auto path = walk(i, nb);
+                if ((int)path.size() >= 2) {
+                    GD.branches.push_back(std::move(path));
+                }
+            }
+        }
+    }
+
+    // Keep very short branches (>=2) so resampling has endpoints to latch onto
+    GD.branches.erase(
+        std::remove_if(GD.branches.begin(), GD.branches.end(),
+                       [](const std::vector<int>& b){ return (int)b.size() < 2; }),
+        GD.branches.end()
+    );
+    return true;
+}
+
+
+/* If sparse skel larger than threshold -> prune small branches! */
+
+/* Joint merging into common junction point! (radius based) */

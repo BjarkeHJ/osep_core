@@ -3,8 +3,8 @@ from launch_ros.actions import Node
 
 FRAME_ID = "base_link"
 SAFETY_DISTANCE = 10.0
-INTERPOLATION_DISTANCE = 3.0
-INSPECTION_SPEED = 2.5
+INTERPOLATION_DISTANCE = 2.0 # was 3.0
+INSPECTION_SPEED = 1.5 # was 2.5
 
 TOPIC_NAMES = {
     "VEL_CMD": '/osep/vel_cmd',
@@ -49,31 +49,31 @@ def generate_launch_description():
                 {"safety_distance": SAFETY_DISTANCE},
             ]
         ),
-        # Node(
-        #     package="osep_skeleton_decomp",
-        #     executable="osep_rosa",
-        #     name="RosaNode",
-        #     output="screen",
-        #     parameters=[
+        Node(
+            package="osep_skeleton_decomp",
+            executable="osep_rosa",
+            name="RosaNode",
+            output="screen",
+            parameters=[
 
-        #     ]
-        # ),
-        # Node(
-        #     package="osep_skeleton_decomp",
-        #     executable="osep_gskel",
-        #     name="GSkelNode",
-        #     output="screen",
-        #     parameters=[
+            ]
+        ),
+        Node(
+            package="osep_skeleton_decomp",
+            executable="osep_gskel",
+            name="GSkelNode",
+            output="screen",
+            parameters=[
 
-        #     ]
-        # ),
-        # Node(
-        #     package="osep_planning",
-        #     executable="osep_planner",
-        #     name="PlannerNode",
-        #     output="screen",
-        #     parameters=[
-
-        #     ]
-        # ),
+            ]
+        ),
+        Node(
+            package="osep_planning",
+            executable="osep_planner",
+            name="PlannerNode",
+            output="screen",
+            parameters=[
+                {"bootstrap_mode": True}
+            ]
+        ),
     ])

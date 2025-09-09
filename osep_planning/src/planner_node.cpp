@@ -94,6 +94,9 @@ private:
     float safe_dist_;
     float reached_dist_th_;
 
+    float prev_dist_to_target = 1e6f;
+
+
     /* Data */
     MsgSkeleton::ConstSharedPtr latest_skel_;
     sensor_msgs::msg::PointCloud2::ConstSharedPtr latest_map_;
@@ -103,7 +106,7 @@ private:
     pcl::PointCloud<pcl::PointXYZ>::Ptr map_cloud_;
     std::shared_ptr<pcl::octree::OctreePointCloudSearch<pcl::PointXYZ>> map_octree_;
     
-    bool bootstrap_mode_ = true;
+    bool bootstrap_mode_;
     size_t bootstrap_idx_ = 0;
     std::vector<geometry_msgs::msg::PoseStamped> bootstrap_waypoints_;
 
@@ -130,10 +133,11 @@ private:
 
 PlannerNode::PlannerNode() : Node("PlannerNode") {
     /* LAUNCH FILE PARAMETER DECLARATIONS */
+    bootstrap_mode_ = declare_parameter<bool>("bootstrap_mode", true);
     tick_ms_ = declare_parameter<int>("tick_ms", 200);
     ctl_ms_ = declare_parameter<int>("control_ms", 50);
     map_voxel_size_ = declare_parameter<float>("map_voxel_size", 1.0f);
-    reached_dist_th_ = declare_parameter<float>("reached_dist_th", 1.0f);
+    reached_dist_th_ = declare_parameter<float>("reached_dist_th", 3.0f);
     safe_dist_ = declare_parameter<float>("safe_dist", 12.0f);
     adjust_timeout_ms_ = declare_parameter<int>("adjuste_timeout_ms", 250);
 
@@ -160,7 +164,7 @@ PlannerNode::PlannerNode() : Node("PlannerNode") {
     vpman_cfg.cam_max_range = 20.0f;
 
     // PATHPLANNER
-    planner_cfg.graph_radius = declare_parameter<float>("graph_radius", 15.0f);
+    planner_cfg.graph_radius = declare_parameter<float>("graph_radius", 20.0f);
     planner_cfg.safe_dist = safe_dist_;
     planner_cfg.map_voxel_size = map_voxel_size_;
 
@@ -201,21 +205,17 @@ PlannerNode::PlannerNode() : Node("PlannerNode") {
         [this]{ publish_viewpoints(); publish_graph(); });
 
     /* Bootstrap Path - Hardcoded */
-    bootstrap_waypoints_.resize(3);
-    for (int i=0; i<3; ++i) {
+    bootstrap_waypoints_.resize(2);
+    for (int i=0; i<2; ++i) {
         bootstrap_waypoints_[i].pose.orientation.w = 1.0; // identity
     }
     bootstrap_waypoints_[0].pose.position.x = 0.0;
     bootstrap_waypoints_[0].pose.position.y = 0.0;
-    bootstrap_waypoints_[0].pose.position.z = 120.0;
+    bootstrap_waypoints_[0].pose.position.z = 80.0;
 
-    bootstrap_waypoints_[1].pose.position.x = 100.0;
+    bootstrap_waypoints_[1].pose.position.x = 180.0;
     bootstrap_waypoints_[1].pose.position.y = 0.0;
     bootstrap_waypoints_[1].pose.position.z = 120.0;
-
-    bootstrap_waypoints_[2].pose.position.x = 180.0;
-    bootstrap_waypoints_[2].pose.position.y = 0.0;
-    bootstrap_waypoints_[2].pose.position.z = 120.0;
 }
 
 void PlannerNode::publish_viewpoints() {
@@ -457,6 +457,7 @@ void PlannerNode::update_skeleton(const std::vector<Vertex>& skel_in) {
             // vin.vid not found -> new vertex
             Vertex vnew = vin; // copy new vertex
             vid2idx_[vnew.vid] = static_cast<int>(skeleton_.size());
+            vnew.spawn_vpts = true;
             skeleton_.push_back(std::move(vnew));
             continue;
         }
@@ -661,11 +662,23 @@ void PlannerNode::control_tick() {
 
     // track reached viewpoints 
     Viewpoint current;
+    float dist_to_target;
     if (planner_->get_next_target(current)) {
-        if ( (current.position - drone_pos).norm() <= reached_dist_th_) {
+        dist_to_target = (current.position - drone_pos).norm();
+        
+        if (dist_to_target > prev_dist_to_target) {
+            std::cout << "Reached target" << std::endl;
             planner_->notify_reached(skeleton_);
             vpman_->commit_coverage(current); // mutates skeleton_ coverage flags
+            prev_dist_to_target = 1e6f;
         }
+
+        else if (dist_to_target <= reached_dist_th_) {
+            std::cout << "Dist to target: " << dist_to_target << std::endl;
+            prev_dist_to_target = dist_to_target;
+        }
+
+
     }
 
     if (!adjusted_) {
@@ -678,7 +691,7 @@ void PlannerNode::control_tick() {
     }
 
     std::vector<Viewpoint> targets;
-    int k = 3;
+    int k = 20;
     if (!planner_->get_next_k_targets(targets, k)) {
         RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "Could not get path - Exiting!");
         return;

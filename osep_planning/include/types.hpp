@@ -32,6 +32,8 @@ struct Vertex {
     bool pos_update = false;
     bool type_update = false;
 
+    bool spawn_vpts = false; // true -> will generate viewpoints
+
     std::vector<Viewpoint> vpts; // Vertex viewpoints
 };
 

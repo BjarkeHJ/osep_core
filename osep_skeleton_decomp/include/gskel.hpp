@@ -4,10 +4,12 @@
 #include <lkf_vertex_fuse.hpp>
 
 #include <iostream>
+#include <numeric>
 #include <chrono>
 #include <algorithm>
 #include <set>
 #include <unordered_map>
+#include <unordered_set>
 #include <pcl/common/common.h>
 #include <pcl/common/point_tests.h>
 #include <pcl/search/kdtree.h>
@@ -89,24 +91,41 @@ struct Vertex {
     bool type_update = false;
 };
 
+struct SparseVertex {
+    int svid = -1;
+    std::vector<int> nb_ids; // svids of neighbors
+    pcl::PointXYZ position;
+    int type = 0; // Invalid(0), Leaf(1), Branch(2), Joint(3)
+    bool pos_update = false;
+    bool type_update = false;
+};
+
 struct GSkelData {
+    /* Incoming */
     pcl::PointCloud<pcl::PointXYZ>::Ptr new_cands;
-    
+
+    /* Dense Graph */
     std::vector<Vertex> prelim_vers;
     std::vector<Vertex> global_vers;
     pcl::PointCloud<pcl::PointXYZ>::Ptr global_vers_cloud;
+    size_t gskel_size;
+    std::unordered_map<int,int> vid2idx;
+
     std::vector<int> new_vers_indxs;
-    
     std::vector<int> joints;
     std::vector<int> leafs;
     std::vector<std::vector<int>> branches;
     std::vector<std::vector<int>> global_adj;
     std::vector<Edge> edges;
-
     int next_vid = 0;
-    size_t gskel_size;
-
-    std::unordered_map<int,int> vid2idx;
+    
+    /* Sparse Graph */
+    std::vector<SparseVertex> sparse_vers;
+    std::vector<std::vector<int>> sparse_adj;
+    std::vector<std::vector<int>> sparse_branches;
+    pcl::PointCloud<pcl::PointXYZ>::Ptr sparse_cloud;
+    std::unordered_map<int,int> sparse_vid2idx;
+    int next_svid = 0; // sparse vertex id
 };
 
 class GSkel {
@@ -118,22 +137,33 @@ public:
     pcl::PointCloud<pcl::PointXYZ>::Ptr& output_cloud() { return GD.global_vers_cloud; }
     std::vector<Vertex>& output_vertices() { return GD.global_vers; }
     
+    pcl::PointCloud<pcl::PointXYZ>::Ptr& output_sparse_cloud() { return GD.sparse_cloud; }
+    std::vector<SparseVertex>& output_sparse_vertices() { return GD.sparse_vers; }
+    
 private:
-    /* Dense Pipeline Functions */
-    bool increment_skeleton();
+    /* Functions */
+    bool new_increment_skeleton(); // new
+
+    bool increment_skeleton(); // made new one...
     bool graph_adj();
     bool mst();
     bool vertex_merge();
     bool prune();
     bool smooth_vertex_positions();
-    bool vid_manager();        
-    /* Helper - Dense */
+    bool vid_manager();
+    
+    bool resample_skeleton();
+    
+    /* Helper */
     void build_cloud_from_vertices();
     void graph_decomp();
     void merge_into(int keep, int del);
     bool size_assert();
     void rebuild_vid_index_map();
     
+    std::vector<Eigen::Vector3f> adaptive_resampling(std::vector<Eigen::Vector3f>& poly, float dmin, float dmax, float beta);
+    bool extract_branches();
+
     GSkelConfig cfg_;
     bool running;
 
