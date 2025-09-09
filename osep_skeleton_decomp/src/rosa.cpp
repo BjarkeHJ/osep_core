@@ -397,12 +397,15 @@ bool Rosa::drosa() {
 }
 
 bool Rosa::dcrosa() {
-    constexpr float CONF_TH = 0.5;
+    constexpr float CONF_TH = 0.5f;
     constexpr int MIN_NB = 3;
+    if (RD.pcd_size_ == 0) return false;
     Eigen::MatrixXf newpset(RD.pcd_size_, 3);
 
-    for (int it=0; it<cfg_.niter_dcrosa; ++it) {
-        for (size_t i=0; i<RD.pcd_size_; ++i) {
+    for (int it = 0; it < cfg_.niter_dcrosa; ++it) {
+        bool any_change = false;
+        // Pass 1: Neighborhood averaging
+        for (size_t i = 0; i < RD.pcd_size_; ++i) {
             const auto& nb = RD.simi_nbs[i];
             if (nb.empty()) {
                 newpset.row(i) = pset.row(i);
@@ -412,30 +415,34 @@ bool Rosa::dcrosa() {
             for (int j : nb) {
                 acc += pset.row(j).transpose();
             }
-            newpset.row(i) = (acc / static_cast<float>(nb.size())).transpose();
+            Eigen::Vector3f avg = acc / static_cast<float>(nb.size());
+            if (!avg.isApprox(pset.row(i).transpose(), 1e-6f)) any_change = true;
+            newpset.row(i) = avg.transpose();
         }
         pset.swap(newpset);
-    
-        for (size_t i=0; i<RD.pcd_size_; ++i) {
+
+        // Pass 2: Local line fit refinement
+        for (size_t i = 0; i < RD.pcd_size_; ++i) {
             const auto& nb = RD.simi_nbs[i];
-            newpset.row(i) = pset.row(i);
-    
+            newpset.row(i) = pset.row(i); // default
             if (static_cast<int>(nb.size()) < MIN_NB) continue;
-    
+
             Eigen::Vector3f mean, dir;
             float conf;
-            if (local_line_fit(RD.simi_nbs[i], mean, dir, conf, MIN_NB) && conf > CONF_TH) {
+            if (local_line_fit(nb, mean, dir, conf, MIN_NB) && conf > CONF_TH) {
                 const Eigen::Vector3f x = pset.row(i).transpose();
                 const float t = dir.dot(x - mean);
-                newpset.row(i) = (mean + t * dir).transpose();
-            }
-            else {
-                newpset.row(i) = pset.row(i);
+                Eigen::Vector3f refined = mean + t * dir;
+                if (!refined.isApprox(pset.row(i).transpose(), 1e-6f)) any_change = true;
+                newpset.row(i) = refined.transpose();
             }
         }
         pset.swap(newpset);
+
+        // Early exit if nothing changed
+        if (!any_change) break;
     }
-    return 1;
+    return true;
 }
 
 bool Rosa::vertex_sampling() {
