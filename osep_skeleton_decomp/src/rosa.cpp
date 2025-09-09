@@ -404,21 +404,38 @@ bool Rosa::dcrosa() {
     if (RD.pcd_size_ == 0) return false;
     Eigen::MatrixXf newpset(RD.pcd_size_, 3);
 
+    constexpr float CONVERGENCE_TH = 1e-5f;
+    constexpr float TRIM_RATIO = 0.2f; // 20% farthest neighbors trimmed
     for (int it = 0; it < cfg_.niter_dcrosa; ++it) {
         bool any_change = false;
-        // Pass 1: Neighborhood averaging
+        float max_delta = 0.0f;
+        // Pass 1: Robust neighborhood averaging (trimmed mean)
         for (size_t i = 0; i < RD.pcd_size_; ++i) {
             const auto& nb = RD.simi_nbs[i];
             if (nb.empty()) {
                 newpset.row(i) = pset.row(i);
                 continue;
             }
-            Eigen::Vector3f acc = Eigen::Vector3f::Zero();
+            // Collect neighbor points and distances
+            std::vector<std::pair<float, Eigen::Vector3f>> dists;
+            const Eigen::Vector3f pi = pset.row(i).transpose();
             for (int j : nb) {
-                acc += pset.row(j).transpose();
+                Eigen::Vector3f pj = pset.row(j).transpose();
+                float d = (pj - pi).squaredNorm();
+                dists.emplace_back(d, pj);
             }
-            Eigen::Vector3f avg = acc / static_cast<float>(nb.size());
-            if (!avg.isApprox(pset.row(i).transpose(), 1e-6f)) any_change = true;
+            // Sort by distance
+            std::sort(dists.begin(), dists.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+            // Trim farthest neighbors
+            size_t trim = static_cast<size_t>(TRIM_RATIO * dists.size());
+            size_t keep = dists.size() - trim;
+            if (keep < 1) keep = 1;
+            Eigen::Vector3f acc = Eigen::Vector3f::Zero();
+            for (size_t k = 0; k < keep; ++k) acc += dists[k].second;
+            Eigen::Vector3f avg = acc / static_cast<float>(keep);
+            float delta = (avg - pi).norm();
+            if (delta > CONVERGENCE_TH) any_change = true;
+            if (delta > max_delta) max_delta = delta;
             newpset.row(i) = avg.transpose();
         }
         pset.swap(newpset);
@@ -435,14 +452,16 @@ bool Rosa::dcrosa() {
                 const Eigen::Vector3f x = pset.row(i).transpose();
                 const float t = dir.dot(x - mean);
                 Eigen::Vector3f refined = mean + t * dir;
-                if (!refined.isApprox(pset.row(i).transpose(), 1e-6f)) any_change = true;
+                float delta = (refined - x).norm();
+                if (delta > CONVERGENCE_TH) any_change = true;
+                if (delta > max_delta) max_delta = delta;
                 newpset.row(i) = refined.transpose();
             }
         }
         pset.swap(newpset);
 
-        // Early exit if nothing changed
-        if (!any_change) break;
+        // Early exit if nothing changed or converged
+        if (!any_change || max_delta < CONVERGENCE_TH) break;
     }
     return true;
 }
