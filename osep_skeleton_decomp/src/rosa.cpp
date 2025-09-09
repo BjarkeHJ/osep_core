@@ -399,15 +399,15 @@ bool Rosa::drosa() {
 }
 
 bool Rosa::dcrosa() {
-    constexpr float CONF_TH = 0.5f;
+    constexpr float CONF_TH = 0.7f;
     constexpr int MIN_NB = 3;
     if (RD.pcd_size_ == 0) return false;
     Eigen::MatrixXf newpset(RD.pcd_size_, 3);
 
     constexpr float CONVERGENCE_TH = 1e-5f;
-    constexpr float TRIM_RATIO = 0.2f; // 20% farthest neighbors trimmed
-    constexpr float MAX_MOVE = 0.1f; // clamp max movement per iteration (units)
-    constexpr float GAUSS_SIGMA = 0.2f; // Gaussian sigma for weighting (units)
+    constexpr float TRIM_RATIO = 0.4f; // 30% farthest neighbors trimmed
+    constexpr float MAX_MOVE = 0.01f; // clamp max movement per iteration (units)
+    constexpr float GAUSS_SIGMA = 0.4f; // Gaussian sigma for weighting (units)
     for (int it = 0; it < cfg_.niter_dcrosa; ++it) {
         bool any_change = false;
         float max_delta = 0.0f;
