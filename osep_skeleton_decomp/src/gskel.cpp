@@ -647,7 +647,6 @@ bool GSkel::resample_skeleton() {
     graph_decomp();
 
     const float fuse        = cfg_.fuse_dist_th;
-    const float eps_rdp     = 0.75f * fuse;       // RDP tolerance
     const float dmin        = 5.0f * fuse;       // min spacing on curves
     const float dmax        = 8.0f * fuse;       // spacing on straights
 
@@ -742,10 +741,8 @@ bool GSkel::resample_skeleton() {
             poly.push_back(GD.global_vers[gi].position.getVector3fMap());
         }
 
-        // simplify + adaptive resampling
-        // auto simp = rdp3D(poly, eps_rdp);
-        auto simp = poly;
-        auto samp = adaptive_resampling(simp, dmin, dmax, beta);
+        // adaptive resampling
+        auto samp = adaptive_resampling(poly, dmin, dmax, beta);
         if (samp.size() < 2) continue;
 
         // emit endpoints (anchors) first then interiors 
@@ -780,7 +777,6 @@ bool GSkel::resample_skeleton() {
         std::sort(nbs.begin(), nbs.end());
         nbs.erase(std::unique(nbs.begin(), nbs.end()), nbs.end());
     }
-
 
     // set type and fill nb_ids with svids
     for (int i=0; i<static_cast<int>(new_sparse.size()); ++i) {
@@ -834,7 +830,6 @@ bool GSkel::resample_skeleton() {
     }
     return 1;
 }
-
 
 /* Helpers */
 void GSkel::build_cloud_from_vertices() {
@@ -993,8 +988,8 @@ bool GSkel::extract_branches() {
 
     std::vector<int> deg(N, 0);
     for (int i=0; i<N; ++i) {
-        // deg[i] = GD.global_vers[i].type;
-        deg[i] = static_cast<int>(GD.global_adj[i].size());
+        deg[i] = GD.global_vers[i].type;
+        // deg[i] = static_cast<int>(GD.global_adj[i].size());
     }
 
 
@@ -1060,51 +1055,6 @@ bool GSkel::extract_branches() {
     );
     return true;
 }
-
-void GSkel::rdp_impl(const std::vector<Eigen::Vector3f>& P, int a, int b, float eps, std::vector<int>& keep) {
-    if (b <= a+1) return;
-    
-    auto pointSegDist = [](const Eigen::Vector3f& x, const Eigen::Vector3f& a, const Eigen::Vector3f& b) -> float {
-        /* ab spans the segment - x lies between */
-        Eigen::Vector3f ab = b - a;
-        Eigen::Vector3f ax = x - a;
-        float lab2 = ab.squaredNorm();
-        if (lab2 < 1e-6f) return (x - a).norm();
-        float s = ax.dot(ab) / lab2;
-        s = std::max(0.f, std::min(1.0f, s));
-        Eigen::Vector3f p = a + s * ab;
-        return (x - p).norm();
-    };
-    
-    float maxd = -1.f; 
-    int idx = -1;
-    
-    for (int i=a+1; i<b; ++i) {
-        float d = pointSegDist(P[i], P[a], P[b]);
-        if (d > maxd) { maxd = d; idx = i; }
-    }
-
-    if (maxd > eps) {
-        rdp_impl(P, a, idx, eps, keep);
-        keep.push_back(idx);
-        rdp_impl(P, idx, b, eps, keep);
-    }
-}
-
-std::vector<Eigen::Vector3f> GSkel::rdp3D(const std::vector<Eigen::Vector3f>& poly, float eps) {
-    const int n = (int)poly.size();
-    if (n <= 2) return poly;
-    std::vector<int> keep; keep.reserve(n);
-    keep.push_back(0);
-
-    rdp_impl(poly, 0, n-1, eps, keep);
-    keep.push_back(n-1);
-    std::sort(keep.begin(), keep.end());
-    std::vector<Eigen::Vector3f> out; out.reserve(keep.size());
-    for (int i : keep) out.push_back(poly[i]);
-    return out;
-}
-
 
 
 /* If sparse skel larger than threshold -> prune small branches! */

@@ -9,6 +9,7 @@
 #include <chrono>
 #include <unordered_set>
 #include <queue>
+#include <algorithm>
 
 #include <pcl/octree/octree.h>
 #include <pcl/kdtree/kdtree_flann.h>
@@ -41,6 +42,9 @@ struct PlannerConfig {
 
     float geometric_bias = 1.0f;   // optional: add cost penalty for geometric edges
     float topo_bonus = 10.0f;       // optional: subtract cost on topological edges
+
+    int max_depth = 15;
+    int beam_width = 4;
 };
 
 struct DronePose {
@@ -100,6 +104,7 @@ private:
     int pick_start_gid_near_drone();
     std::vector<int> build_subgraph(int start_gid, std::vector<char>& allow_transit);
     std::vector<int> greedy_plan(int start_gid, const std::vector<int>& cand, const std::vector<char>& allow_transit, float budget_left);
+
     void dijkstra(const std::vector<char>& allow, int s, std::vector<float>& dist, std::vector<int>& parent, const float radius=std::numeric_limits<float>::infinity());
     bool line_of_sight(const Eigen::Vector3f& a, const Eigen::Vector3f& b);
     float edge_cost(GraphEdge& e);

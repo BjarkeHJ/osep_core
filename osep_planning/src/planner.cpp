@@ -209,7 +209,7 @@ bool PathPlanner::rh_plan_tick() {
     if (cand.empty()) return 0;
 
     auto exec_gids = greedy_plan(start_gid, cand, allow_transit, cfg_.budget);
-
+    
     if (exec_gids.empty()) {
         PD.rhs.exec_path_ids.clear();
         PD.rhs.next_target_id = 0ull;
@@ -530,6 +530,7 @@ std::vector<int> PathPlanner::greedy_plan(int start_gid, const std::vector<int>&
 
     return exec;
 }
+
 
 void PathPlanner::dijkstra(const std::vector<char>& allow, int src, std::vector<float>& dist, std::vector<int>& parent, const float radius) {
     const int N = static_cast<int>(PD.graph.nodes.size());

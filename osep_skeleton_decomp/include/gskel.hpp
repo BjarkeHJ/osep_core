@@ -163,9 +163,6 @@ private:
     
     std::vector<Eigen::Vector3f> adaptive_resampling(std::vector<Eigen::Vector3f>& poly, float dmin, float dmax, float beta);
     bool extract_branches();
-    void rdp_impl(const std::vector<Eigen::Vector3f>& P, int a, int b, float eps, std::vector<int>& keep);
-    std::vector<Eigen::Vector3f> rdp3D(const std::vector<Eigen::Vector3f>& poly, float eps);
-
 
     GSkelConfig cfg_;
     bool running;
