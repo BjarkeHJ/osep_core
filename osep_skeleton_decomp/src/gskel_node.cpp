@@ -37,6 +37,7 @@ private:
     void publish_gvert(const std::vector<Vertex>& vertices, const std_msgs::msg::Header& src_header);
     void publish_edges(const std::vector<Vertex>& vertices, const std_msgs::msg::Header& src_header);
 
+    void publish_sparse_gskel(pcl::PointCloud<pcl::PointXYZ>::Ptr& gskel_out, const std_msgs::msg::Header& src_header);
     void publish_sparse_gvert(const std::vector<SparseVertex>& vertices, const std_msgs::msg::Header& src_header);
     void publish_sparse_edges(const std::vector<SparseVertex>& vertices, const std_msgs::msg::Header& src_header);
 
@@ -45,6 +46,8 @@ private:
     /* ROS2 */
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr vers_sub_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr gskel_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr gskel_pub_sparse_;
+
     rclcpp::Publisher<MsgSkeleton>::SharedPtr gvert_pub_;
     rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr conn_mk_pub_;
 
@@ -71,6 +74,7 @@ private:
 
     sensor_msgs::msg::PointCloud2::ConstSharedPtr latest_msg_;
     pcl::PointCloud<pcl::PointXYZ>::Ptr global_skeleton;
+    pcl::PointCloud<pcl::PointXYZ>::Ptr global_skeleton_sparse;
 };
 
 GSkelNode::GSkelNode() : Node("GSkelNode") {
@@ -78,6 +82,8 @@ GSkelNode::GSkelNode() : Node("GSkelNode") {
     // MISC
     rosa_topic_ = declare_parameter<std::string>("rosa_topic", "/osep/rosa/local_rosa_points");
     gskel_topic_ = declare_parameter<std::string>("gskel_topic", "/osep/gskel/global_skeleton_cloud");
+    sparse_cloud_topic_ = declare_parameter<std::string>("sparse_cloud_topic", "/osep/gskel/global_sparse_skeleton_cloud");
+
     gvert_topic_ = declare_parameter<std::string>("gvert_topic", "/osep/gskel/global_skeleton_vertices");
     edge_topic_ = declare_parameter<std::string>("edge_topic", "/osep/gskel/global_skeleton_edges");
     tick_ms_ = declare_parameter<int>("tick_ms", 50);
@@ -109,6 +115,9 @@ GSkelNode::GSkelNode() : Node("GSkelNode") {
     auto pub_qos = rclcpp::QoS(rclcpp::KeepLast(1));
     pub_qos.reliable().transient_local();
     gskel_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(gskel_topic_, pub_qos);
+    gskel_pub_sparse_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(sparse_cloud_topic_, pub_qos);
+
+    gskel_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(gskel_topic_, pub_qos);
     gvert_pub_ = this->create_publisher<MsgSkeleton>(gvert_topic_, pub_qos);
     conn_mk_pub_ = this->create_publisher<visualization_msgs::msg::Marker>(edge_topic_, pub_qos);
 
@@ -120,6 +129,8 @@ GSkelNode::GSkelNode() : Node("GSkelNode") {
     /* INITIALIZE DATA STRUCTURES */
     global_skeleton.reset(new pcl::PointCloud<pcl::PointXYZ>);
     global_skeleton->points.reserve(1000);
+    global_skeleton_sparse.reset(new pcl::PointCloud<pcl::PointXYZ>);
+    global_skeleton_sparse->points.reserve(1000);
     RCLCPP_INFO(this->get_logger(), "GSkelNode Initialized");
 }
 
@@ -226,6 +237,28 @@ void GSkelNode::publish_edges(const std::vector<Vertex>& vertices, const std_msg
     }
 
     conn_mk_pub_->publish(edges_msg);
+}
+
+void GSkelNode::publish_sparse_gskel(pcl::PointCloud<pcl::PointXYZ>::Ptr& gskel_out, const std_msgs::msg::Header& src_header) {
+    if (!gskel_out) return;
+
+    gskel_out->width = gskel_out->points.size();
+    gskel_out->height = 1;
+    gskel_out->is_dense = true;
+
+    if (gskel_out->points.size() != static_cast<int>(gskel_out->width) * gskel_out->height) {
+        RCLCPP_ERROR(get_logger(), "[PUBLISH GSKEL] Error: Bad Cloud Dims!");
+        return;
+    }
+
+    sensor_msgs::msg::PointCloud2 gskel_cloud_msg;
+    pcl::toROSMsg(*gskel_out, gskel_cloud_msg);
+    gskel_cloud_msg.header = src_header;
+    if (gskel_cloud_msg.header.frame_id.empty()) gskel_cloud_msg.header.frame_id = global_frame_id_;
+    if (gskel_cloud_msg.header.stamp.sec == 0 && gskel_cloud_msg.header.stamp.nanosec == 0) {
+        gskel_cloud_msg.header.stamp = this->get_clock()->now();
+    }
+    gskel_pub_sparse_->publish(gskel_cloud_msg);
 }
 
 void GSkelNode::publish_sparse_gvert(const std::vector<SparseVertex>& vertices, const std_msgs::msg::Header& src_header) {
@@ -347,9 +380,10 @@ void GSkelNode::process_tick() {
 
             // Run GSkel and update global skeleton 
             if (gskel_->gskel_run()) {
-                // auto out = gskel_->output_cloud();
-                auto out = gskel_->output_sparse_cloud();
+                auto out = gskel_->output_cloud();
+                auto out_sparse = gskel_->output_sparse_cloud();
                 if (out) *global_skeleton = *out;
+                if (out_sparse) *global_skeleton_sparse = *out_sparse;
                 updated = true;
                 meas_stamp = rclcpp::Time(msg->header.stamp);
             }
@@ -365,8 +399,9 @@ void GSkelNode::process_tick() {
     else {
         hdr.stamp = tf_safe_stamp("lidar", global_frame_id_);
     }
-
+    
     publish_gskel(global_skeleton, hdr);
+    publish_sparse_gskel(global_skeleton_sparse, hdr);
     publish_sparse_gvert(gskel_->output_sparse_vertices(), hdr);
     publish_sparse_edges(gskel_->output_sparse_vertices(), hdr);
     

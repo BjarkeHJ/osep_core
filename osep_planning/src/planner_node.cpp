@@ -209,9 +209,9 @@ PlannerNode::PlannerNode() : Node("PlannerNode") {
     for (int i=0; i<2; ++i) {
         bootstrap_waypoints_[i].pose.orientation.w = 1.0; // identity
     }
-    bootstrap_waypoints_[0].pose.position.x = 0.0;
+    bootstrap_waypoints_[0].pose.position.x = 50.0;
     bootstrap_waypoints_[0].pose.position.y = 0.0;
-    bootstrap_waypoints_[0].pose.position.z = 80.0;
+    bootstrap_waypoints_[0].pose.position.z = 100.0;
 
     bootstrap_waypoints_[1].pose.position.x = 180.0;
     bootstrap_waypoints_[1].pose.position.y = 0.0;

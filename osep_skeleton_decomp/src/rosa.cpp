@@ -318,7 +318,8 @@ bool Rosa::drosa() {
     
     /* ROSA POINT POSITION */
     // float PLANAR_TH = 0.1;
-    float PLANAR_TH = 0.0; // disable
+    // Enable planar fallback for flat surfaces
+    float PLANAR_TH = 0.2f; // tune as needed (0.05-0.15 typical)
     std::vector<int> good_ids;
     std::vector<int> poor_ids;
     std::vector<Eigen::Vector3f> goodCenters;
@@ -342,7 +343,7 @@ bool Rosa::drosa() {
 
         Eigen::Vector3f center_f;
         if (planar_score < PLANAR_TH) {
-            std::cout << "PLANAR PCA FALLBACK!" << std::endl;
+            // std::cout << "PLANAR PCA BLEND!" << std::endl;
             Eigen::Vector3f mean_p = Eigen::Vector3f::Zero();
             Eigen::Vector3f mean_n = Eigen::Vector3f::Zero();
             for (int i : active) {
@@ -355,10 +356,11 @@ bool Rosa::drosa() {
             const float inv_m = 1.0f / static_cast<float>(active.size());
             mean_p *= inv_m;
             mean_n *= inv_m;
-            // center_f = mean_p - mean_n * (0.5f * cfg_.max_proj_range);
-            center_f = mean_p - mean_n * cfg_.max_proj_range;
-        }
-        else {
+            Eigen::Vector3f fallback_center = mean_p - mean_n * cfg_.max_proj_range;
+            Eigen::Vector3f proj_center = closest_projection_point(active);
+            float blend = 0.5f; // 0.0 = only projection, 1.0 = only fallback
+            center_f = blend * fallback_center + (1.0f - blend) * proj_center;
+        } else {
             center_f = closest_projection_point(active);
         }
 
@@ -397,45 +399,84 @@ bool Rosa::drosa() {
 }
 
 bool Rosa::dcrosa() {
-    constexpr float CONF_TH = 0.5;
+    constexpr float CONF_TH = 0.7f;
     constexpr int MIN_NB = 3;
+    if (RD.pcd_size_ == 0) return false;
     Eigen::MatrixXf newpset(RD.pcd_size_, 3);
 
-    for (int it=0; it<cfg_.niter_dcrosa; ++it) {
-        for (size_t i=0; i<RD.pcd_size_; ++i) {
+    constexpr float CONVERGENCE_TH = 1e-5f;
+    constexpr float TRIM_RATIO = 0.4f; // 30% farthest neighbors trimmed
+    constexpr float MAX_MOVE = 0.01f; // clamp max movement per iteration (units)
+    constexpr float GAUSS_SIGMA = 0.4f; // Gaussian sigma for weighting (units)
+    for (int it = 0; it < cfg_.niter_dcrosa; ++it) {
+        bool any_change = false;
+        float max_delta = 0.0f;
+        // Pass 1: Robust neighborhood averaging (weighted trimmed mean, Gaussian weights, clamped move)
+        for (size_t i = 0; i < RD.pcd_size_; ++i) {
             const auto& nb = RD.simi_nbs[i];
             if (nb.empty()) {
                 newpset.row(i) = pset.row(i);
                 continue;
             }
-            Eigen::Vector3f acc = Eigen::Vector3f::Zero();
+            // Collect neighbor points and distances
+            std::vector<std::pair<float, Eigen::Vector3f>> dists;
+            const Eigen::Vector3f pi = pset.row(i).transpose();
             for (int j : nb) {
-                acc += pset.row(j).transpose();
+                Eigen::Vector3f pj = pset.row(j).transpose();
+                float d = (pj - pi).norm();
+                dists.emplace_back(d, pj);
             }
-            newpset.row(i) = (acc / static_cast<float>(nb.size())).transpose();
+            // Sort by distance
+            std::sort(dists.begin(), dists.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+            // Trim farthest neighbors
+            size_t trim = static_cast<size_t>(TRIM_RATIO * dists.size());
+            size_t keep = dists.size() - trim;
+            if (keep < 1) keep = 1;
+            // Weighted mean (Gaussian)
+            double wsum = 0.0;
+            Eigen::Vector3d acc = Eigen::Vector3d::Zero();
+            for (size_t k = 0; k < keep; ++k) {
+                double w = std::exp(-0.5 * (dists[k].first * dists[k].first) / (GAUSS_SIGMA * GAUSS_SIGMA));
+                acc += w * dists[k].second.cast<double>();
+                wsum += w;
+            }
+            Eigen::Vector3d avg = (wsum > 0.0) ? (acc / wsum) : Eigen::Vector3d(pi.x(), pi.y(), pi.z());
+            Eigen::Vector3f avgf = avg.cast<float>();
+            Eigen::Vector3f move = avgf - pi;
+            float move_norm = move.norm();
+            if (move_norm > MAX_MOVE) move = move * (MAX_MOVE / move_norm);
+            Eigen::Vector3f newp = pi + move;
+            float delta = move.norm();
+            if (delta > CONVERGENCE_TH) any_change = true;
+            if (delta > max_delta) max_delta = delta;
+            newpset.row(i) = newp.transpose();
         }
         pset.swap(newpset);
-    
-        for (size_t i=0; i<RD.pcd_size_; ++i) {
+
+        // Pass 2: Local line fit refinement
+        for (size_t i = 0; i < RD.pcd_size_; ++i) {
             const auto& nb = RD.simi_nbs[i];
-            newpset.row(i) = pset.row(i);
-    
+            newpset.row(i) = pset.row(i); // default
             if (static_cast<int>(nb.size()) < MIN_NB) continue;
-    
+
             Eigen::Vector3f mean, dir;
             float conf;
-            if (local_line_fit(RD.simi_nbs[i], mean, dir, conf, MIN_NB) && conf > CONF_TH) {
+            if (local_line_fit(nb, mean, dir, conf, MIN_NB) && conf > CONF_TH) {
                 const Eigen::Vector3f x = pset.row(i).transpose();
                 const float t = dir.dot(x - mean);
-                newpset.row(i) = (mean + t * dir).transpose();
-            }
-            else {
-                newpset.row(i) = pset.row(i);
+                Eigen::Vector3f refined = mean + t * dir;
+                float delta = (refined - x).norm();
+                if (delta > CONVERGENCE_TH) any_change = true;
+                if (delta > max_delta) max_delta = delta;
+                newpset.row(i) = refined.transpose();
             }
         }
         pset.swap(newpset);
+
+        // Early exit if nothing changed or converged
+        if (!any_change || max_delta < CONVERGENCE_TH) break;
     }
-    return 1;
+    return true;
 }
 
 bool Rosa::vertex_sampling() {
