@@ -16,6 +16,7 @@ PathPlanner::PathPlanner(const PlannerConfig& cfg) : cfg_(cfg) {
 bool PathPlanner::plan(std::vector<Vertex>& gskel) {
     /* Main public function - Runs the path planning pipeline */
     running = build_graph(gskel);
+    rehydrate_state(gskel);
 
     if (!plan_path) return 1; // exit without executing path planning
     running = rh_plan_tick();
@@ -39,8 +40,13 @@ bool PathPlanner::build_graph(std::vector<Vertex>& gskel) {
         for (int k=0; k<static_cast<int>(v.vpts.size()); ++k) {
             const Viewpoint& vp = v.vpts[k];
 
-            if (vp.invalid) continue;
+            if (vp.invalid || vp.vptid == 0ull) continue;
             // if (vp.visited) continue; // excluded visited from graph
+
+            if (vp.vptid == 0ull) {
+                std::cerr << "[GRAPH] Warning: viewpoint with zero handle id!" << std::endl;
+                // continue;
+            }
 
             GraphNode n;
             n.vptid = vp.vptid; // set unique handle id
@@ -188,132 +194,72 @@ bool PathPlanner::rh_plan_tick() {
         if (PD.rhs.start_id == 0ull) return 0;
         start_gid = sg;
     }
-    
-    // std::vector<int> prev_exec_gids;
-    // prev_exec_gids.reserve(PD.rhs.exec_path_ids.size());
-    // for (uint64_t hid : PD.rhs.exec_path_ids) {
-    //     int gid = -1;
-    //     auto it = PD.h2g.find(hid);
-    //     if (it != PD.h2g.end()) {
-    //         gid = it->second;
-    //     }
-    //     if (gid >= 0) {
-    //         prev_exec_gids.push_back(gid);
-    //     }
-    // }
-    // bool had_prev_plan = !prev_exec_gids.empty();
-    
+
+    // Check if current path is still valid -> If so: append new points
+
     // Extract subgraph around start
     std::vector<char> allow_transit; // all nodes within subgraph radius
     auto cand = build_subgraph(start_gid, allow_transit); // subgraph gids (number of nodes bounded in cand)
+
+    std::cout << "[GRAPH] Number of graph nodes: " << PD.graph.nodes.size() << std::endl;
     if (cand.empty()) return 0;
 
-    auto exec_gids = greedy_plan(start_gid, cand, allow_transit, cfg_.budget);
-    
-    if (exec_gids.empty()) {
-        PD.rhs.exec_path_ids.clear();
-        PD.rhs.next_target_id = 0ull;
+    // Run planner on current horizon (sub-graph)
+    std::vector<int> dfs_order;
+    float best_score = -1e9f;
+    bounded_dfs_plan(start_gid, cand, allow_transit, dfs_order, best_score);
+
+    std::cout << "[PLAN] Number of dfs viewpoints: " << dfs_order.size() << std::endl;
+
+    if (dfs_order.empty()) {
         return 0;
     }
 
-    // candidate path score
-    float cand_score = path_score_from_gids(exec_gids);
-
-    // current remaining path gids
-    std::vector<uint64_t> cur_h = PD.rhs.exec_path_ids;
-    cur_h.erase(std::remove_if(cur_h.begin(), cur_h.end(),
-        [&](uint64_t h){ return PD.rhs.visited.count(h) || !PD.h2g.count(h); }), cur_h.end());
-    auto cur_gids = handles_to_gids(cur_h);
-
-    // no current remaining path -> accept new
-    bool accept = cur_gids.empty();
-
-    if (!accept) {
-        int locked_prefix = std::max(cfg_.min_keep_prefix, PD.rhs.keep_prefix);
-        int shared = common_prefix_len(cur_gids, exec_gids);
-        float dev_pen = cfg_.dev_penalty * std::max(0, locked_prefix - shared);
-        float adj_cand = cand_score - dev_pen;
-
-        float cur_score = path_score_from_gids(cur_gids);
-
-        // hysteresis
-        float rel_need = cur_score * (1.0f + cfg_.switch_rel);
-        float abs_need = cur_score + cfg_.switch_abs;
-    
-        auto now = std::chrono::steady_clock::now();
-        double now_s = std::chrono::duration<double>(now.time_since_epoch()).count();
-
-        bool cooldown_ok = (PD.rhs.last_switch_time < 0) || ((now_s - PD.rhs.last_switch_time) >= cfg_.replan_cooldown_s);
-
-        bool force = !std::isfinite(cur_score) || cur_gids.size() <= 1;
-        
-        if (force) {
-            accept = true;
-        }
-        else if (cooldown_ok && (adj_cand >= rel_need || adj_cand >= abs_need)) {
-            accept = true;
-        }
-        else {
-            accept = false;
-        }
+    std::vector<uint64_t> new_path;
+    new_path.reserve(dfs_order.size());
+    for (int g : dfs_order) {
+        if (g < 0 || g >= static_cast<int>(PD.g2h.size())) continue;
+        uint64_t hid = PD.g2h[g];
+        if (hid == 0ull) continue; // invalid handle
+        new_path.push_back(hid);
     }
+    
+    std::cout << "[PATH] Number of executable viewpoints: " << new_path.size() << " with score " << best_score << std::endl;
+    if (new_path.empty()) return 0;
 
-    // commit plan
-    PD.rhs.exec_path_ids.clear();
+    float old_score = PD.rhs.last_plan_score;
+    bool accept = false;
 
-    if (accept) {
-        PD.rhs.exec_path_ids.reserve(exec_gids.size());
-        for (int g : exec_gids) {
-            uint64_t h = PD.g2h[g];
-            if (!h || PD.rhs.visited.count(h)) continue;
-            PD.rhs.exec_path_ids.push_back(h);
-        }
-
-        PD.rhs.last_plan_score = cand_score;
-
-        auto now = std::chrono::steady_clock::now();
-        PD.rhs.last_switch_time = std::chrono::duration<double>(now.time_since_epoch()).count();
-        PD.rhs.keep_prefix = cfg_.min_keep_prefix;
+    if (PD.rhs.exec_path_ids.empty() || old_score < 0.0f) {
+        accept = true; // no previous path
     }
     else {
-        PD.rhs.exec_path_ids = std::move(cur_h);
+        float thresh = old_score * (1.0f + cfg_.hysteresis);
+        std::cout << "Old Score: " << old_score << " New Score: " << best_score << " Thresh: " << thresh << std::endl;
+        accept = (best_score > thresh);
     }
 
-    size_t idx = 0;
-    while (idx < PD.rhs.exec_path_ids.size() && PD.rhs.exec_path_ids[idx] == PD.rhs.start_id) {
-        ++idx;
+    if (accept) {
+        std::cout << "Path Accepted!" << std::endl;
+        PD.rhs.exec_path_ids = std::move(new_path);
+        PD.rhs.last_plan_score = best_score;
+
+        PD.rhs.next_target_id = 0ull;
+        for (size_t i = 0; i<PD.rhs.exec_path_ids.size(); ++i) {
+            uint64_t h = PD.rhs.exec_path_ids[i];
+            if (!PD.rhs.visited.count(h)) {
+                if (i == 0 && h == PD.rhs.start_id) continue; // already visited start
+                PD.rhs.next_target_id = h;
+                break;
+            }
+        }
+
+        if (PD.rhs.next_target_id == 0ull) {
+            PD.rhs.next_target_id = (PD.rhs.exec_path_ids.size() > 1) ? PD.rhs.exec_path_ids[1] : PD.rhs.exec_path_ids.front();
+        }
     }
-    PD.rhs.next_target_id = (idx < PD.rhs.exec_path_ids.size()) ? PD.rhs.exec_path_ids[idx] : 0ull;
 
     return 1;
-
-
-    // // reward and cost
-    // float rew = 0.0f;
-    // for (size_t i=0; i+1<exec_gids.size(); ++i) {
-    //     rew += node_reward(PD.graph.nodes[exec_gids[i]]);
-    // }
-    // float cost = path_travel_cost(exec_gids);
-    // float new_score = rew - cfg_.lambda * cost;
-
-    // PD.rhs.exec_path_ids.clear();
-    // PD.rhs.exec_path_ids.reserve(exec_gids.size());
-    // for (int g : exec_gids) {
-    //     uint64_t vptid = PD.g2h[g];
-    //     if (vptid == 0ull) continue;
-    //     if (PD.rhs.visited.count(vptid)) continue;
-    //     PD.rhs.exec_path_ids.push_back(vptid);
-    // }
-
-    // PD.rhs.last_plan_score = new_score;
-    
-    // size_t idx = 0;
-    // while (idx < PD.rhs.exec_path_ids.size() && PD.rhs.exec_path_ids[idx] == PD.rhs.start_id) {
-    //     ++idx;
-    // }
-    // PD.rhs.next_target_id = (idx < PD.rhs.exec_path_ids.size()) ? PD.rhs.exec_path_ids[idx] : 0ull;
-    // // PD.rhs.next_target_id = PD.rhs.exec_path_ids.front();
-    // return 1;
 }
 
 bool PathPlanner::set_path(std::vector<Vertex>& gskel) {
@@ -358,6 +304,58 @@ bool PathPlanner::set_path(std::vector<Vertex>& gskel) {
 }
 
 /* HELPERS */
+void PathPlanner::rehydrate_state(std::vector<Vertex>& gskel) {
+    // remove visited that no longer exists
+    {
+        std::vector<uint64_t> to_erase;
+        to_erase.reserve(PD.rhs.visited.size());
+        for (auto h : PD.rhs.visited) {
+            if (!PD.h2g.count(h)) to_erase.push_back(h);
+        }
+
+        for (auto h : to_erase) PD.rhs.visited.erase(h);
+    }
+
+    // remap start_id to current graph
+    if (PD.rhs.start_id != 0ull && !PD.h2g.count(PD.rhs.start_id)) {
+        PD.rhs.start_id = 0ull;
+    }
+    if (PD.rhs.start_id == 0ull) {
+        int sg = pick_start_gid_near_drone();
+        if (sg >= 0 && sg < static_cast<int>(PD.g2h.size()) && PD.g2h[sg] != 0ull) {
+            PD.rhs.start_id = PD.g2h[sg];
+        }
+    }
+
+    // clear exec_path_ids against current graph and visisted set
+    {
+        std::vector<uint64_t> cleaned;
+        cleaned.reserve(PD.rhs.exec_path_ids.size());
+        for (auto h : PD.rhs.exec_path_ids) {
+            if (h == 0ull) continue;
+            if (!PD.h2g.count(h)) continue; // not in current graph
+            if (PD.rhs.visited.count(h)) continue; // already visited
+            if (cleaned.empty() || cleaned.back() != h) {
+                cleaned.push_back(h);
+            }
+        }
+        PD.rhs.exec_path_ids = std::move(cleaned);
+    }
+
+    // PD.rhs.next_target_id = 0ull;
+    // for (uint64_t h : PD.rhs.exec_path_ids) {
+    //     if (PD.h2g.count(h) && !PD.rhs.visited.count(h)) {
+    //         PD.rhs.next_target_id = h;
+    //         break;
+    //     }
+    // }
+
+    retarget_head();
+    if (PD.rhs.next_target_id == 0ull && PD.rhs.start_id != 0ull && PD.h2g.count(PD.rhs.start_id)) {
+        PD.rhs.next_target_id = PD.rhs.start_id;
+    }
+}
+
 int PathPlanner::pick_start_gid_near_drone() {
     if (PD.graph.nodes.empty()) return -1;
     float best = std::numeric_limits<float>::infinity();
@@ -365,6 +363,8 @@ int PathPlanner::pick_start_gid_near_drone() {
     const Eigen::Vector3f& dpos = PD.drone_pose.pos;
     for (const auto& n : PD.graph.nodes) {
         uint64_t hid = PD.g2h[n.gid]; // viewpoint id handle
+        if (hid == 0ull) continue; // invalid handle
+        if (!PD.h2g.count(hid)) continue; // stale handle: skip
         if (PD.rhs.visited.count(hid)) continue; // if visited -> skip
 
         float d2 = (n.p - dpos).squaredNorm();
@@ -415,122 +415,86 @@ std::vector<int> PathPlanner::build_subgraph(int start_gid, std::vector<char>& a
         out.push_back(cands[i].gid);
     }
     return out;
-
-    // using P = std::pair<float,int>;
-    // std::priority_queue<P, std::vector<P>, std::greater<P>> pq; // min-heap: smallest distance (the float - P.first) is at pq.top()
-    // dist[start_gid] = 0.0f;
-    // pq.emplace(0.0f, start_gid);
-
-    // while (!pq.empty()) {
-    //     auto [d,u] = pq.top(); // fetch the smallest distance and its node id
-    //     pq.pop(); // pop from the queue
-    //     if (d != dist[u]) continue; //outdated entries (should not happen)
-    //     if (d > cfg_.subgraph_radius) continue; // Skip and pop - Goes out of bounds of the search radius
-    //     in[u] = true; // mark as in subgraph
-
-    //     // for each edge of the node...
-    //     for (const auto& e : PD.graph.adj[u]) {
-    //         float w = edge_cost(e); // edge cost 
-    //         int v = e.to; // gid of the edge connection
-
-    //         // if the current distance to node v is greater than the distance to node u plus the edge cost to get there -> shorter path found
-    //         if (dist[v] > d + w) {
-    //             dist[v] = d + w; // replace the distance with the smaller (improved)
-    //             pq.emplace(dist[v], v); // push the node 
-    //         }
-    //     }
-    // }
-
-    // // push the corresponding gids masked true to the candidate vector
-    // std::vector<int> cand;
-    // cand.reserve(cfg_.subgraph_max_nodes);
-    // for (int i=0; i<N && static_cast<int>(cand.size())<cfg_.subgraph_max_nodes; ++i) {
-    //     if (in[i]) {
-    //         cand.push_back(i);
-    //     }
-    // }
-    // return cand; // gids of subgraph
 }
 
-std::vector<int> PathPlanner::greedy_plan(int start_gid, const std::vector<int>& cand, const std::vector<char>& allow_transit, float budget_left) {
-    std::vector<int> exec;
-    const int N = static_cast<int>(PD.graph.nodes.size());
-    if (cand.empty() || budget_left <= 0.0f || N == 0 || start_gid < 0 || start_gid >= N) return exec;
-    
-    std::vector<char> picked(N, 0);
-    int cur = start_gid;
+void PathPlanner::bounded_dfs_plan(int start_gid, const std::vector<int>& subgraph, const std::vector<char> allow_transit, std::vector<int>& path, float& best_score) {
+    path.clear();
+    if (subgraph.empty() || start_gid < 0 || start_gid >= static_cast<int>(PD.graph.nodes.size())) return;
 
-    while (budget_left > 0.0f) {
-        if (!allow_transit[cur]) break;
+    std::unordered_set<int> sub_set(subgraph.begin(), subgraph.end());
 
-        std::vector<float> dist;
-        std::vector<int> parent;
-        dijkstra(allow_transit, cur, dist, parent, std::numeric_limits<float>::infinity());
+    float max_node_rew = 0.0f;
+    for (int gid : subgraph) {
+        if (gid < 0 || gid >= static_cast<int>(PD.graph.nodes.size())) continue;
+        max_node_rew = std::max(max_node_rew, node_reward(PD.graph.nodes[gid]));
+    }
 
-        int best_gid = -1;
-        float best_score = -1e30f;
-        float best_travel = 0.0f;
+    std::vector<int> cur_path;
+    cur_path.reserve(cfg_.dfs_max_depth + 1);
+    std::vector<bool> on_path(PD.graph.nodes.size(), false);
 
-        for (int g : cand) {
-            if (g < 0 || g >= N) continue;
-            if (g == cur) continue;
-            if (picked[g]) continue;
+    auto push_node = [&](int u) { cur_path.push_back(u); on_path[u] = true; };
+    auto pop_node = [&]() { on_path[cur_path.back()] = false; cur_path.pop_back(); };
 
-            // uint64_t hid = PD.g2h[g];
-            // if (hid == 0ull) continue;
-            // if (PD.rhs.visited.count(hid)) continue;
-
-            // cost
-            float C = (g < static_cast<int>(dist.size())) ? dist[g] : std::numeric_limits<float>::infinity();
-            if (!std::isfinite(C)) continue; // unreachable within subgraph
-
-            // gain
-            float G = node_reward(PD.graph.nodes[g]);
-            if (G <= 0.0f) continue;
-
-            // float score = G - cfg_.lambda * (C);
-            float score = G / (C + 1e-3f); 
-            if (score > best_score) {
-                best_score = score;
-                best_gid = g;
-                best_travel = C;
+    std::function<void(int, int, float, float)> dfs = [&](int u, int depth, float cur_rew, float cur_cost) {
+        {
+            float cur_score = cur_rew - cfg_.lambda*cur_cost;
+            if (cur_score > best_score) {
+                best_score = cur_score;
+                path = cur_path;
             }
         }
 
-        if (best_gid < 0 || best_score <= 0.0f) break;
+        if (depth >= cfg_.dfs_max_depth) return;
+
+        float optimistic = cur_rew + (cfg_.dfs_max_depth - depth) * max_node_rew;
+        if (optimistic - cfg_.lambda * cur_cost < best_score) return; // prune
         
-        // start exec with cur once
-        if (exec.empty()) {
-            exec.push_back(cur);
+        struct Cand { int v; float key; float edge_w; };
+        std::vector<Cand> cands;
+        cands.reserve(PD.graph.adj[u].size());
+
+        for (const auto& e : PD.graph.adj[u]) {
+            int v = e.to;
+            if (v < 0 || v >= static_cast<int>(PD.graph.nodes.size())) continue; // invalid
+            if (!allow_transit[v]) continue; // not allowed
+            if (!is_in_subgraph(v, sub_set)) continue; // not in subgraph
+            if (on_path[v]) continue; // already on path
+            if (PD.rhs.visited.count(PD.g2h[v])) continue; // already visited
+
+            float w = edge_cost(e);
+            float next_cost  = cur_cost + w;
+            if (next_cost > cfg_.budget) continue; // over budget
+
+            float step_gain = node_reward(PD.graph.nodes[v]) - cfg_.lambda * w;
+            float key = step_gain + 0.01f * node_reward(PD.graph.nodes[v]); // slight preference to high reward nodes
+            cands.push_back( {v, key, w} );
         }
 
-        // reconstruct cur -> best_gid edge-by-edge
-        std::vector<int> rev;
-        int t = best_gid;
-        while (t != -1) {
-            rev.push_back(t);
-            if (t == cur) break;
-            t = parent[t];
+        if (cands.empty()) return;
+
+        std::partial_sort(cands.begin(), cands.begin() + std::min<int>(cfg_.dfs_beam_width, static_cast<int>(cands.size())), cands.end(),
+            [](const Cand& a, const Cand& b) { return a.key > b.key; } );
+
+        int K = std::min<int>(cfg_.dfs_beam_width, static_cast<int>(cands.size()));
+        for (int i=0; i<K; ++i) {
+            int v = cands[i].v;
+            float w = cands[i].edge_w;
+            float next_rew = cur_rew + node_reward(PD.graph.nodes[v]);
+            float next_cost = cur_cost + w;
+            
+            push_node(v);
+            dfs(v, depth + 1, next_rew, next_cost);
+            pop_node();
         }
+    };
 
-        if (rev.empty() || rev.back() != cur) break; // should not happen
-
-        // append forward
-        for (int i=static_cast<int>(rev.size() - 2); i>=0; --i) {
-            exec.push_back(rev[i]);
-        }
-
-        // commit
-        picked[best_gid] = 1;
-        budget_left -= best_travel;
-        cur = best_gid;
-
-        if (best_travel <= 1e-6f) break;
-    }
-
-    return exec;
+    // initialize with starting node
+    if (!is_in_subgraph(start_gid, sub_set) || !allow_transit[start_gid]) return;
+    push_node(start_gid);
+    dfs(start_gid, 0, node_reward(PD.graph.nodes[start_gid]), 0.0f);
+    pop_node();
 }
-
 
 void PathPlanner::dijkstra(const std::vector<char>& allow, int src, std::vector<float>& dist, std::vector<int>& parent, const float radius) {
     const int N = static_cast<int>(PD.graph.nodes.size());
@@ -623,7 +587,7 @@ bool PathPlanner::line_of_sight(const Eigen::Vector3f& a, const Eigen::Vector3f&
     return 1;
 }
 
-float PathPlanner::edge_cost(GraphEdge& e) {
+float PathPlanner::edge_cost(const GraphEdge& e) {
     float w = e.w;
     if (cfg_.geometric_bias != 0.0f && !e.topo) w += cfg_.geometric_bias;
     if (cfg_.topo_bonus != 0.0f && e.topo) w = std::max(0.0f, w - cfg_.topo_bonus);
@@ -662,11 +626,29 @@ float PathPlanner::path_travel_cost(const std::vector<int>& gids) {
     return c;
 }
 
+uint64_t PathPlanner::retarget_head() {
+    for (uint64_t h : PD.rhs.exec_path_ids) {
+        if (h && PD.h2g.count(h) && !PD.rhs.visited.count(h)) {
+            PD.rhs.start_id = h;
+            PD.rhs.next_target_id = h;
+            return h;
+        }
+    }
+    PD.rhs.next_target_id = 0ull;
+    return 0ull;
+}
 
 /* Public methods for Control updates */
 bool PathPlanner::get_next_target(Viewpoint& out) {
-    /* not used... */
-    if (PD.rhs.next_target_id == 0ull) return false;
+    if (PD.rhs.next_target_id == 0ull || 
+        !PD.h2g.count(PD.rhs.next_target_id) || 
+        PD.rhs.visited.count(PD.rhs.next_target_id)) {
+        
+        if (retarget_head() == 0ull) {
+            return false;
+        }
+        return false;
+    }
 
     auto it = PD.h2g.find(PD.rhs.next_target_id);
     if (it == PD.h2g.end()) return false;
@@ -683,82 +665,75 @@ bool PathPlanner::get_next_target(Viewpoint& out) {
     return true;
 }
 
-bool PathPlanner::get_start(Viewpoint& out) {
-    /* not used*/
-    if (PD.rhs.start_id == 0ull) return false;
-    auto it = PD.h2g.find(PD.rhs.start_id);
-    if (it == PD.h2g.end()) return false;
-    int g = it->second;
-    if (g < 0 || g >= static_cast<int>(PD.graph.nodes.size())) return false;
-    const GraphNode& gn = PD.graph.nodes[g];
-    out.position = gn.p;
-    out.yaw = gn.yaw;
-    out.orientation = yaw_to_quat(gn.yaw);
-    out.target_vid = gn.vid;
-    out.target_vp_pos = gn.k;
-    out.in_path = true;
-    return true;
-}
-
 bool PathPlanner::get_next_k_targets(std::vector<Viewpoint>& out_k, int k) {
-    if (PD.rhs.exec_path_ids.empty()) {
-        // std::cout << "GetNextKTargets Error: 1" << std::endl; // no viewpoint in path
+    out_k.clear();
+    if (k <= 0) return false;
+
+    const auto& seq = PD.rhs.exec_path_ids;
+
+    if (seq.empty()) {
+        std::cout << "[GET PATH] No point in path!" << std::endl;
         return false;
     }
 
-    int s = 0;
-    while (s < (int)PD.rhs.exec_path_ids.size() && PD.rhs.exec_path_ids[s] == PD.rhs.start_id) {
-        ++s;
-    }
-    if (s >= (int)PD.rhs.exec_path_ids.size()) return false;
-
-
-    // try to get k targets
-    int avail = static_cast<int>(PD.rhs.exec_path_ids.size()) - s;
-    if (k > avail) {
-        k = avail;
+    size_t start_i = 0;
+    if (PD.rhs.next_target_id != 0ull) {
+        auto it = std::find(seq.begin(), seq.end(), PD.rhs.next_target_id);
+        if (it != seq.end()) {
+            start_i = std::distance(seq.begin(), it);
+        }
     }
 
-    out_k.resize(k); // size the vector correctly
-    for (int i=0; i<k; ++i) {
-        const uint64_t& id = PD.rhs.exec_path_ids[s + i];
+    int produced = 0;
+    for (size_t i = start_i; i < seq.size() && produced < k; ++i) {
+        const uint64_t id = seq[i];
+
+        // Map handle -> current graph gid
         auto it = PD.h2g.find(id);
-        if (it == PD.h2g.end()) {
-            // std::cout << "GetNextKTargets Error: 2" << std::endl; // cannot find handle in gids
-            return false;
-        }
-        int g = it->second;
-        if (g < 0 || g >= static_cast<int>(PD.graph.nodes.size())) {
-            // std::cout << "GetNextKTargets Error: 3" << std::endl; // gid not valid
-            return false;
-        }
+        if (it == PD.h2g.end()) continue; // stale handle: skip
+        const int g = it->second;
+        if (g < 0 || g >= static_cast<int>(PD.graph.nodes.size())) continue; // stale gid: skip
+
         const GraphNode& gn = PD.graph.nodes[g];
-        out_k[i].position = gn.p;
-        out_k[i].yaw = gn.yaw;
-        out_k[i].orientation = yaw_to_quat(gn.yaw);
-        out_k[i].target_vid = gn.vid;
-        out_k[i].target_vp_pos = gn.k;
-        out_k[i].vptid = gn.vptid;
-        out_k[i].in_path = true;
+
+        Viewpoint vp;
+        vp.position = gn.p;
+        vp.yaw = gn.yaw;
+        vp.orientation = yaw_to_quat(gn.yaw);
+        vp.target_vid = gn.vid;
+        vp.target_vp_pos = gn.k;
+        vp.vptid = gn.vptid;
+        vp.in_path = true;
+
+        out_k.push_back(std::move(vp));
+        ++produced;
     }
-    return true;
+
+    return produced > 0;
 }
 
 bool PathPlanner::notify_reached(std::vector<Vertex>& gskel) {
     if (PD.rhs.next_target_id == 0ull) return false;
     
+    if (!PD.h2g.count(PD.rhs.next_target_id)) {
+        if (retarget_head() == 0ull) {
+            std::cout << "[NOTIFY] No mapped target available!\n";
+            return false;
+        }
+    }
+
     (void)mark_visited_in_skeleton(PD.rhs.next_target_id, gskel);
 
     PD.rhs.visited.insert(PD.rhs.next_target_id);
     PD.rhs.start_id = PD.rhs.next_target_id;
-
-    if (PD.rhs.keep_prefix > 0) PD.rhs.keep_prefix -= 1; // decay lock by one
 
     // Erase prefix up to (and including) the reached handle
     auto it = std::find(PD.rhs.exec_path_ids.begin(), PD.rhs.exec_path_ids.end(), PD.rhs.start_id);
     if (it != PD.rhs.exec_path_ids.end()) {
         PD.rhs.exec_path_ids.erase(PD.rhs.exec_path_ids.begin(), std::next(it));
     }
+
+    
 
     // Drop any stale/visisted handles
     PD.rhs.exec_path_ids.erase(
@@ -768,6 +743,7 @@ bool PathPlanner::notify_reached(std::vector<Vertex>& gskel) {
     
     PD.rhs.next_target_id = PD.rhs.exec_path_ids.empty() ? 0ull : PD.rhs.exec_path_ids.front();
 
+    retarget_head();
     return true;
 }
 
@@ -815,7 +791,6 @@ bool PathPlanner::mark_visited_in_skeleton(uint64_t hid, std::vector<Vertex>& gs
     return false; // not found this tick
 }
 
-
 std::vector<int> PathPlanner::handles_to_gids(const std::vector<uint64_t>& h) {
     std::vector<int> out;
     out.reserve(h.size());
@@ -849,7 +824,6 @@ int PathPlanner::common_prefix_len(const std::vector<int>& A, const std::vector<
 
 
 /* 
-
 TODO:
 - Actually delte viewpoints (Treats invalid = delete / Fine for now)
 - Make LOS a corridor (0.5 safe dist?) (Done)
@@ -867,5 +841,4 @@ TODO:
 - color seen voxels in real time? 
 
 - End-of-Mission Criteria: No more valid viewpoints with sufficient score! -> Return to start?
-
 */

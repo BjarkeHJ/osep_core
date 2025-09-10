@@ -10,11 +10,7 @@ struct RHState {
     uint64_t next_target_id = 0ull;
     std::vector<uint64_t> exec_path_ids;  // expanded sequence of vptid handles to execute (graph-connected)
     std::unordered_set<uint64_t> visited;  // viewpoints already visited
-
     float last_plan_score = -1.0f;
-
-    double last_switch_time = -1.0; // last time for acceptning new plan
-    int keep_prefix = 0; // how many upcoming viewpoints are locked
 };
 
 #endif
