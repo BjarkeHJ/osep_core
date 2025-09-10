@@ -21,7 +21,7 @@ bool ViewpointManager::update_viewpoints(std::vector<Vertex>& gskel) {
     /* Main public function */
     running = sample_viewpoints(gskel);
     // running = filter_viewpoints(gskel);
-    running = prune_viewpoints(gskel);
+    // running = prune_viewpoints(gskel);
     running = score_viewpoints(gskel);
     return running;
 }
@@ -32,13 +32,12 @@ bool ViewpointManager::sample_viewpoints(std::vector<Vertex>& gskel) {
     for (int i=0; i<static_cast<int>(gskel.size()); ++i) {
         Vertex& v = gskel[i];
 
+        // const bool need_resample = v.type_update || v.spawn_vpts;
         const bool need_resample = v.type_update || v.spawn_vpts;
+
         if (need_resample) {
             v.vpts = new_generate_viewpoints(gskel, v);
         }
-
-        
-    
     }
 
 
@@ -268,7 +267,6 @@ bool ViewpointManager::prune_viewpoints(std::vector<Vertex>& gskel) {
 
     return 1;
 }
-
 
 bool ViewpointManager::score_viewpoints(std::vector<Vertex>& gskel) {
     if (gskel.empty()) return 0;
