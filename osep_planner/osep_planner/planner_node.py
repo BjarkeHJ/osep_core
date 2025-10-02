@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
 
+"""
+TODO:
+    - Create Adjacency representation for the skeleton points in SkeletonState
+    - Generate 4DOF Viewpoints for 
+
+"""
+
+
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import PointCloud2
