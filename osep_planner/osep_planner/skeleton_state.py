@@ -36,12 +36,17 @@ class SkeletonState:
         self._color2seg: dict[int, int] = {}
         self._next_seg_id: int = 0
 
+        self._deleted_vids: list[int] = []
+
     def get_skeleton(self) -> np.ndarray:
         if not self.skelver:
             return np.empty((0, 4), dtype=np.float64)
         vids = sorted(self.skelver.keys())
         rows = [[vid, *self.skelver[vid].pos] for vid in vids]
         return np.array(rows, dtype=np.float64)
+
+    def get_deleted_vids(self) -> list[int]:
+        return self._deleted_vids
 
     def get_size(self) -> int:
         return len(self.skelver)
@@ -56,6 +61,8 @@ class SkeletonState:
         return [vid for vid, v in self.skelver.items() if v.last_update > since_version]
 
     def update_skeleton(self, points_xyz: np.ndarray, rgb_u32: np.ndarray):
+        self._deleted_vids = []
+        
         if points_xyz is None or points_xyz.size == 0:
             return
         
@@ -79,16 +86,16 @@ class SkeletonState:
                 vid_new = self._create_vertex(p, seg)
                 touched_vids.add(vid_new)
 
-            self._prune_unseen(touched_vids)
+            # self._prune_unseen(touched_vids)
+            self._deleted_vids = self._prune_unseen(touched_vids)
             self._post_update_branches()
             self._update_adjacency()
             self._set_vertex_type()
             # self._invalidate_index()
             return
 
-        r = float(np.sqrt(self._search_r2))
-
         # For each point, get ALL candidate vertex indices within r
+        r = float(np.sqrt(self._search_r2))
         idx_lists = self._kdtree.query_ball_point(pts, r=r)
 
         # Build candidate (dist, point_idx, vert_idx) tuples
@@ -124,7 +131,8 @@ class SkeletonState:
                 vid_new = self._create_vertex(p, segs_in[i])
                 touched_vids.add(vid_new)
 
-        self._prune_unseen(touched_vids)
+        # self._prune_unseen(touched_vids)
+        self._deleted_vids = self._prune_unseen(touched_vids)
         self._post_update_branches()
         self._update_adjacency()
         self._set_vertex_type()
@@ -132,9 +140,7 @@ class SkeletonState:
 
         print(f"Number of segments: {len(self.branch_ids)}")
         print(f"Branch IDs: {self.branch_ids}")
-
         print(f"Adjacency Matrix Size: {self.adjacency.shape}")
-
 
     def _create_vertex(self, p: np.ndarray, seg: int) -> int:
         vid = self._next_id
@@ -184,13 +190,16 @@ class SkeletonState:
         self.branch_ids, inverse = np.unique(segs, return_inverse=True)
         self.branches = {int(seg): vids[inverse == i] for i, seg in enumerate(self.branch_ids)}
 
-    def _prune_unseen(self, touched_vids: set[int]) -> None:
+    def _prune_unseen(self, touched_vids: set[int]) -> list[int]:
         if not self.skelver:
-            return
+            return []
+        deleted = []
         for vid in list(self.skelver.keys()):
             if vid not in touched_vids:
+                deleted.append(vid)
                 del self.skelver[vid]
-
+        return deleted
+        
     @staticmethod
     def _rgbkey_from_u32(u : np.uint32) -> int:
         # Mast to lower 24 bits
