@@ -20,9 +20,8 @@ ViewpointManager::ViewpointManager(const ViewpointConfig& cfg) : cfg_(cfg) {
 bool ViewpointManager::update_viewpoints(std::vector<Vertex>& gskel) {
     /* Main public function */
     running = sample_viewpoints(gskel);
-    // running = filter_viewpoints(gskel);
-    running = prune_viewpoints(gskel);
     running = score_viewpoints(gskel);
+
     return running;
 }
 
@@ -33,239 +32,12 @@ bool ViewpointManager::sample_viewpoints(std::vector<Vertex>& gskel) {
         Vertex& v = gskel[i];
 
         const bool need_resample = v.type_update || v.spawn_vpts;
+
         if (need_resample) {
             v.vpts = new_generate_viewpoints(gskel, v);
         }
-
-        
+    }
     
-    }
-
-
-    return 1;
-}
-
-bool ViewpointManager::prune_viewpoints(std::vector<Vertex>& gskel) {
-    if (gskel.empty()) return 1;
-
-    const float POS_EPS = cfg_.vpt_safe_dist * std::sin(cfg_.cam_hfov_rad / 2.0f);
-    const float YAW_EPS = deg2rad(15.0f);
-    const float JACCARD_THR = 0.85f;
-
-    auto yaw_diff = [&](float a, float b) -> float {
-        return std::abs(wrapPi(a-b));
-    };
-
-    auto jaccard = [&](const std::vector<uint64_t>& A, const std::vector<uint64_t>& B) -> float {
-        /* IoU */
-        size_t i = 0;
-        size_t j = 0;
-        size_t inter = 0;
-        while (i < A.size() && j < B.size()) {
-            if (A[i] == B[j]) {
-                ++inter;
-                ++i;
-                ++j;
-            }
-            else if (A[i] < B[j]) {
-                ++i;
-            }
-            else {
-                ++j;
-            }
-
-        }
-        const size_t uni = A.size() + B.size() - inter;
-        return (uni == 0) ? 0.0f : float(inter) / float(uni);
-    };
-
-    struct FlatVP {
-        int vidx;
-        int lidx;
-        bool force_keep;
-        Eigen::Vector3f pos;
-        float yaw;
-        std::vector<uint64_t> hits;
-        int new_hits = 0;
-        bool keep = false;
-    };
-
-    std::vector<FlatVP> flat;
-    flat.reserve(512);
-
-    // Flatten + visibility hits
-    {
-        std::vector<uint64_t> tmp;
-        for (int vi = 0; vi < static_cast<int>(gskel.size()); ++vi) {
-            Vertex& v = gskel[vi];
-            for (int li=0; li<static_cast<int>(v.vpts.size()); ++li) {
-                Viewpoint& vp = v.vpts[li];
-                if (vp.invalid) continue;
-
-                FlatVP f;
-                f.vidx = vi;
-                f.lidx = li;
-                f.force_keep = (vp.in_path || vp.visited);
-                f.pos = vp.position;
-                f.yaw = vp.yaw;
-
-                tmp.clear();
-                collect_visible_hits(vp, tmp);
-                if (!tmp.empty()) {
-                    std::sort(tmp.begin(), tmp.end());
-                    tmp.erase(std::unique(tmp.begin(), tmp.end()), tmp.end());
-                }
-                f.hits = std::move(tmp);
-                int fresh = 0;
-                for (auto k : f.hits) {
-                    if (cov_.seen.find(k) == cov_.seen.end()) ++fresh;
-                    f.new_hits = fresh;
-
-                    flat.push_back(std::move(f));
-                }
-            }
-        }
-    }
-
-    if (flat.empty()) return 1;
-
-    // global pose bucketing
-    struct CellKey { int ix, iy, iz, iyaw; };
-    struct CellKeyHash {
-        size_t operator()(const CellKey& k) const noexcept {
-            // simple hash combine
-            size_t h = 1469598103934665603ull;
-            auto mix = [&](int v){
-                size_t x = (size_t)(uint32_t)v;
-                h ^= x + 0x9e3779b97f4a7c15ull + (h<<6) + (h>>2);
-            };
-            mix(k.ix); mix(k.iy); mix(k.iz); mix(k.iyaw);
-            return h;
-        }
-    };
-    struct CellKeyEq {
-        bool operator()(const CellKey& a, const CellKey& b) const noexcept {
-            return a.ix==b.ix && a.iy==b.iy && a.iz==b.iz && a.iyaw==b.iyaw;
-        }
-    };
-
-    auto wrap_yaw_bin = [&](float yaw)->int {
-        float y = wrapPi(yaw) + float(M_PI); // [0, 2pi)
-        int   b = (int)std::floor(y / YAW_EPS);
-        // protect extremely rare edge at 2pi
-        const int maxb = std::max(1, (int)std::ceil((2.0f*float(M_PI))/YAW_EPS) - 1);
-        if (b > maxb) b = maxb;
-        if (b < 0) b = 0;
-        return b;
-    };  
-
-    std::unordered_map<CellKey, std::vector<int>, CellKeyHash, CellKeyEq> buckets;
-    buckets.reserve(flat.size());
-
-    for (int i = 0; i < (int)flat.size(); ++i) {
-        const auto& f = flat[i];
-        // Force-kept viewpoints bypass buckets (kept later unconditionally)
-        if (f.force_keep) continue;
-
-        CellKey key {
-            (int)std::floor(f.pos.x() / POS_EPS),
-            (int)std::floor(f.pos.y() / POS_EPS),
-            (int)std::floor(f.pos.z() / POS_EPS),
-            wrap_yaw_bin(f.yaw)
-        };
-        buckets[key].push_back(i);
-    }
-
-    // in each bucket, keep the "best" by new_hits
-    for (auto& kv : buckets) {
-        const auto& idxs = kv.second;
-        if (idxs.empty()) continue;
-        int best = idxs[0];
-        for (int j : idxs) {
-            if (flat[j].new_hits > flat[best].new_hits) best = j;
-            else if (flat[j].new_hits == flat[best].new_hits &&
-                     flat[j].hits.size() > flat[best].hits.size()) best = j;
-        }
-        flat[best].keep = true;
-    }
-
-    // mark force-keep for keeping
-    for (auto& f : flat) if (f.force_keep) f.keep = true;
-
-    // visibility-NMS across kept ones to kill near-duplicates across bucket borders
-    {
-        // collect all kept candidates and sort by descending new_hits (then total hits)
-        std::vector<int> kept_idx;
-        kept_idx.reserve(flat.size());
-        for (int i = 0; i < (int)flat.size(); ++i) if (flat[i].keep) kept_idx.push_back(i);
-
-        std::sort(kept_idx.begin(), kept_idx.end(), [&](int a, int b){
-            if (flat[a].new_hits != flat[b].new_hits) return flat[a].new_hits > flat[b].new_hits;
-            return flat[a].hits.size() > flat[b].hits.size();
-        });
-
-        std::vector<int> accepted;
-        accepted.reserve(kept_idx.size());
-
-        for (int i : kept_idx) {
-            bool drop = false;
-            // Don’t NMS away force_keep viewpoints
-            if (!flat[i].force_keep) {
-                for (int j : accepted) {
-                    // Quick rejection by pose before heavy Jaccard
-                    const float d2 = (flat[i].pos - flat[j].pos).squaredNorm();
-
-                    if (d2 > 4.0f * POS_EPS * POS_EPS) continue; // far enough
-                    if (yaw_diff(flat[i].yaw, flat[j].yaw) > 2.0f * YAW_EPS) continue;
-
-                    float jac = jaccard(flat[i].hits, flat[j].hits);
-                    if (jac >= JACCARD_THR) { drop = true; break; }
-                }
-            }
-            if (!drop) accepted.push_back(i);
-        }
-
-        // Reset keep flags; mark only accepted
-        for (auto& f : flat) f.keep = false;
-        for (int i : accepted) flat[i].keep = true;
-    }
-
-    // write back per-vertex lists (preserve order locally, reindex target_vp_pos)
-    {
-        // Build a quick map: for each vertex, list of local indices to keep
-        std::vector<std::vector<int>> keep_local(gskel.size());
-        for (int i = 0; i < (int)flat.size(); ++i) {
-            if (!flat[i].keep) continue;
-            keep_local[flat[i].vidx].push_back(flat[i].lidx);
-        }
-
-        // For each vertex, rebuild vpts with the kept indices
-        for (int vi = 0; vi < (int)gskel.size(); ++vi) {
-            auto& v = gskel[vi];
-            if (v.vpts.empty()) continue;
-
-            // Create a quick boolean mask
-            std::vector<char> keep_mask(v.vpts.size(), 0);
-            for (int li : keep_local[vi]) if (li >= 0 && li < (int)keep_mask.size()) keep_mask[li] = 1;
-
-            // Rebuild
-            std::vector<Viewpoint> new_vpts;
-            new_vpts.reserve(keep_local[vi].size());
-            for (int li = 0; li < (int)v.vpts.size(); ++li) {
-                const auto& vp = v.vpts[li];
-                // if a vp is visited/in_path but not in keep_mask (e.g., not bucketed), keep it
-                const bool must_keep = (vp.in_path || vp.visited);
-                if (must_keep || (li < (int)keep_mask.size() && keep_mask[li])) {
-                    new_vpts.push_back(vp);
-                }
-            }
-
-            // Reindex target_vp_pos
-            for (int i = 0; i < (int)new_vpts.size(); ++i) new_vpts[i].target_vp_pos = i;
-            v.vpts.swap(new_vpts);
-        }
-    }
-
     return 1;
 }
 
@@ -281,7 +53,8 @@ bool ViewpointManager::score_viewpoints(std::vector<Vertex>& gskel) {
                 continue;
             }
             if (vp.visited) {
-                vp.score = 0.0f;
+                // vp.score = 0.0f;
+                vp.score = -1.0f;
                 continue;
             }
 

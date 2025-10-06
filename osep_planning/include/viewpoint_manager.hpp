@@ -20,11 +20,11 @@ struct ViewpointConfig {
     float map_voxel_size;
     float vpt_safe_dist;
 
+    float cam_max_range;
     float cam_hfov_rad;
     float cam_vfov_rad;
-    float cam_Nx;
-    float cam_Ny;
-    float cam_max_range;
+    int cam_Nx;
+    int cam_Ny;
 };
 
 class ViewpointManager {
@@ -43,8 +43,6 @@ public:
 private:
     /* Functions */
     bool sample_viewpoints(std::vector<Vertex>& gskel);
-    bool prune_viewpoints(std::vector<Vertex>& gskel);
-
     bool score_viewpoints(std::vector<Vertex>& gskel);
 
     /* Helpers */
@@ -59,7 +57,6 @@ private:
     GainStats estimate_viewpoint_coverage(const Viewpoint& vp);
     void build_rayset(float hfov_rad, float vfov_rad, int Nx, int Ny, float maxR);
     bool is_occ_voxel(const Eigen::Vector3f& p);
-
 
     /* Inlines */
     inline float deg2rad(float d) { return d * float(M_PI) / 180.0f; }
@@ -97,7 +94,7 @@ private:
     std::unordered_map<int, uint32_t> per_vertex_seg; // vid -> seq counter
 
     /* DATA */
-    bool running; 
+    bool running;
     ViewpointConfig cfg_;
     std::shared_ptr<pcl::octree::OctreePointCloudSearch<pcl::PointXYZ>> octree_;
     pcl::PointCloud<pcl::PointXYZ>::ConstPtr gmap;

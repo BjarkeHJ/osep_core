@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>osep_planner</name>
+  <version>0.1.0</version>
+  <description>Planner node with incremental skeleton &amp; viewpoint manager.</description>
+
+  <maintainer email="you@example.com">Your Name</maintainer>
+  <license>MIT</license>
+
+  <!-- CMake-based package -->
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <!-- We install Python modules via CMake -->
+  <depend>ament_cmake_python</depend>
+
+  <!-- Runtime deps -->
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

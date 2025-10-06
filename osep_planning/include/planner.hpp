@@ -28,23 +28,19 @@ struct PlannerConfig {
     float safe_dist;
 
     // RHO params
-    float budget = 20.0f;          // max travel cost for this horizon (meters or edge cost units)
-    float lambda = 1.0f;           // travel-vs-reward trade-off
+    float budget = 200.0f;          // max travel cost for this horizon (meters or edge cost units)
+    float lambda = 0.1f;           // travel-vs-reward trade-off
+
     float subgraph_radius = 200.0f; // dijkstra radius cutoff
-    int   subgraph_max_nodes = 50;
+    int subgraph_max_nodes = 50;
+
     float hysteresis = 0.15f;      // replan only if new_score > old*(1+hysteresis)
 
-    float switch_rel = 0.15f;
-    float switch_abs = 5.0f;
-    float dev_penalty = 3.0f;
-    int min_keep_prefix = 2;
-    float replan_cooldown_s = 2.0f;
+    int dfs_max_depth = 10;     // max number of viewpoints in receding horizon plan
+    int dfs_beam_width = 5;    // beam width for dfs expansion (0 = full expansion)
 
     float geometric_bias = 1.0f;   // optional: add cost penalty for geometric edges
     float topo_bonus = 10.0f;       // optional: subtract cost on topological edges
-
-    int max_depth = 15;
-    int beam_width = 4;
 };
 
 struct DronePose {
@@ -97,29 +93,34 @@ public:
 private:
     /* Functions */
     bool build_graph(std::vector<Vertex>& gskel);
-    bool rh_plan_tick();    
+    bool rh_plan_tick();
+    bool path_refine_tick();
     bool set_path(std::vector<Vertex>& gskel);
 
     /* Helper */
+    void rehydrate_state(std::vector<Vertex>& gskel);
     int pick_start_gid_near_drone();
     std::vector<int> build_subgraph(int start_gid, std::vector<char>& allow_transit);
-    std::vector<int> greedy_plan(int start_gid, const std::vector<int>& cand, const std::vector<char>& allow_transit, float budget_left);
+    void bounded_dfs_plan(int start_gid, const std::vector<int>& subgraph, const std::vector<char> allow_transit, std::vector<int>& path, float& best_score);
 
     void dijkstra(const std::vector<char>& allow, int s, std::vector<float>& dist, std::vector<int>& parent, const float radius=std::numeric_limits<float>::infinity());
     bool line_of_sight(const Eigen::Vector3f& a, const Eigen::Vector3f& b);
-    float edge_cost(GraphEdge& e);
+    float edge_cost(const GraphEdge& e);
     float node_reward(const GraphNode& n);
-    float path_travel_cost(const std::vector<int>& gids);
+    uint64_t retarget_head();
 
+    
+    float path_travel_cost(const std::vector<int>& gids);
     std::vector<int> handles_to_gids(const std::vector<uint64_t>& h);
     float path_score_from_gids(const std::vector<int>& gids);
     int common_prefix_len(const std::vector<int>& A, const std::vector<int>& B);
+
 
     bool mark_visited_in_skeleton(uint64_t hid, std::vector<Vertex>& gskel);    
     
     inline Eigen::Quaternionf yaw_to_quat(float yaw) { return Eigen::Quaternionf(Eigen::AngleAxisf(yaw, Eigen::Vector3f::UnitZ())); }
 
-    
+    inline bool is_in_subgraph(int gid, const std::unordered_set<int>& sub_set) { return sub_set.find(gid) != sub_set.end(); }
 
     /* Params & Data */
     pcl::PointCloud<pcl::PointXYZ>::ConstPtr gmap;
