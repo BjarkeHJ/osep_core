@@ -92,8 +92,13 @@ class ViewpointManager:
             
             self._prev_type_by_vid[vid] = v.type
         
-        self._check_viewpoints() # Should be fixed to move viewpoints backwards OR trigger resample?
-
+        self._check_viewpoints()
+        
+        if getattr(self.occ_map, "_needs_rescore"):
+            for vp in list(self.viewpoints.values()):
+                self._score_viewpoint(vp)
+            self.occ_map._needs_rescore = False
+        
         self._last_skel_version = cur_ver # update stored version 
 
     def _make_viewpoint(self, vid: int):
@@ -142,6 +147,7 @@ class ViewpointManager:
             )
             out_vpts.append(vp)
             u_coeffs.append(u)
+            self._score_viewpoint(vp) # score viewpoint
 
         if abs(float(that[2])) > max(abs(float(that[0])), abs(float(that[1]))):
             for u in (n1, n2, -n1, -n2):
@@ -168,35 +174,23 @@ class ViewpointManager:
             vp = self.viewpoints.get(vptid)
             if not vp or not vp.valid:
                 continue
+
             if vp.u_coeff is None:
                 vp.u_coeff = np.array([1,0,0], dtype=np.float64)
 
-            MAX_TRIES = 10
-            step = max(0.5 * self.occ_map.voxel_size, 0.5)
-            u = vp.u_coeff if (vp.u_coeff is not None) else np.array([1.0, 0.0, 0.0], dtype=np.float32)
-            u = self._normalize(u)
-            d = safe_r # plus dtfs
-            p = np.array([vpos[0] + d*u[0], vpos[1] + d*u[1], z_ref], dtype=np.float64)
-            tries = 0
-            while tries < MAX_TRIES and not self._is_position_safe(p, 0.9 * safe_r):
-                d += step
-                p = np.array([vpos[0] + d*u[0], vpos[1] + d*u[1], z_ref], dtype=np.float64)
-                tries += 1
-            
-            if not self._is_position_safe(p, 0.9 * safe_r):
-                # delete viewpoint 
-                self.viewpoints.pop(vptid, None)
-                bucket = self._ids_by_vid.get(vid)
-                if bucket:
-                    try:
-                        bucket.remove(vptid)
-                    except ValueError:
-                        pass
+            if self._move_viewpoint_backwards(vp, max_tries=10):
+                self._score_viewpoint(vp) # rescore viewpoint
                 continue
-            
-            vp.pos = p
-            vp.yaw = float(self._yaw_to_face(vp.pos, vpos))
-            vp.valid = True
+
+            self.viewpoints.pop(vptid, None)
+            bucket = self._ids_by_vid.get(vid)
+            if bucket:
+                try:
+                    bucket.remove(vptid)
+                except ValueError:
+                    pass
+                if not bucket:
+                    self._ids_by_vid.pop(vp.vid, None)
 
     def _replace_for_vid(self, vid, vpts) -> None:
         old = self._ids_by_vid.pop(int(vid), [])
@@ -296,7 +290,6 @@ class ViewpointManager:
             return
         
         margin = 0.9*float(self._safe_dist)
-
         kdt = getattr(self.occ_map, "_kdtree", None)
         centers = getattr(self.occ_map, "_centers", None)
 
@@ -307,19 +300,71 @@ class ViewpointManager:
             to_del_idx = np.where(d < margin)[0]
             for i in to_del_idx[::-1]:
                 vptid, vp = items[i]
+                if self._move_viewpoint_backwards(vp, max_tries=10):
+                    items.pop(i)
+                    continue
+
                 self.viewpoints.pop(vptid, None)
                 bucket = self._ids_by_vid.get(vp.vid)
                 if bucket:
                     try:
-                        bucket.remove(vptid, None)
+                        bucket.remove(vptid)
                     except ValueError:
                         pass
+                    if not bucket:
+                        self._ids_by_vid.pop(vp.vid, None)
                 items.pop(i)
-
         else:
             print("Error! Could not get kd tree")
             
+    def _move_viewpoint_backwards(self, vp: Viewpoint, max_tries: int = 10) -> bool:
+        if self.occ_map is None:
+            return False
+        v = self.skeleton.skelver.get(vp.vid)
+        if v is None:
+            return False
+        
+        vpos = v.pos
+        z_ref = float(vpos[2])
+        safe_r = float(self._safe_dist)
+        step = max(0.5 * self.occ_map.voxel_size, 0.5)
 
+        if vp.u_coeff is not None:
+            u = self._normalize(vp.u_coeff)
+        else:
+            dvec = vp.pos - vpos
+            u = self._normalize(dvec)
+            if float(np.linalg.norm(u)) < 1e-8:
+                _, n1, _ = self._build_local_frame(vp.vid)
+                u = self._normalize(n1)
+        
+        d0 = float(np.linalg.norm((vp.pos - vpos)[:2]))
+        d = max(d0, safe_r)
+
+        for _ in range(max_tries):
+            p = np.array([vpos[0] + d*u[0], vpos[1] + d*u[1], z_ref], dtype=np.float64)
+            if self._is_position_safe(p, 0.9*safe_r):
+                vp.pos = p
+                vp.yaw = float(self._yaw_to_face(p, vpos))
+                vp.valid = True
+                vp.u_coeff = u
+                return True
+            d += step
+        return False
+
+
+    def _score_viewpoint(self, vp: Viewpoint) -> None:
+        if not vp or not vp.valid or vp.visited:
+            return 
+        try:
+            new_seen = self.occ_map.mark_visible_from(vp.pos, vp.yaw, commit=False)
+            if isinstance(new_seen, int) and new_seen >= 0:
+                vp.score = float(new_seen)
+            else:
+                vp.score = 0.0
+        except Exception:
+            return
+        
     @staticmethod
     def _yaw_to_face(dir: np.ndarray, tgt: np.ndarray) -> float:
         # Yaw value to face target tgt from camera dir

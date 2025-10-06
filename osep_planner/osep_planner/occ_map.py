@@ -19,6 +19,7 @@ class OCCMap:
         self._kdtree_rebuild_stride = int(kdtree_rebuild_stride)
 
         self._seen: set[tuple[int, int, int]] = set()
+        self._needs_rescore: bool = False
 
     def insert_centers(self, centers_xyz: np.ndarray) -> None:
         if centers_xyz.size == 0:
@@ -36,12 +37,14 @@ class OCCMap:
             self._insert_batches_since_rebuild += 1
             if (self._kdtree is None) or (self._insert_batches_since_rebuild >= self._kdtree_rebuild_stride):
                 self._rebuild_kdtree()
+            self._needs_rescore = True
     
     def clear(self):
         self._occ.clear()
         self._centers = np.empty((0, 3), dtype=np.float32)
         self._kdtree = None
         self._insert_batches_since_rebuild = 0
+        self._needs_rescore = True
     
     def is_occupied(self, p: np.ndarray) -> bool:
         return self._voxel_index_of_point(p) in self._occ
@@ -90,7 +93,7 @@ class OCCMap:
                 return False
         return True
     
-    def mark_visible_from(self, cam_pos: np.ndarray, yaw: float) -> int:
+    def mark_visible_from(self, cam_pos: np.ndarray, yaw: float, commit: bool = False) -> int:
         if self._kdtree is None or self._centers.shape[0] == 0:
             return 0
         
@@ -114,8 +117,7 @@ class OCCMap:
 
         dists = np.linalg.norm(self._centers[idxs] - cam[None, :], axis=1)
         order = np.argsort(dists)
-        new_seen = 0
-        seen_this_call: set[tuple[int, int, int]] = set()
+        potential_new: set[tuple[int, int, int]] = set()
 
         budget = len(order)
         for j in order[:budget]:
@@ -135,15 +137,21 @@ class OCCMap:
             if abs(az) > h_half or abs(el) > v_half:
                 continue
 
-            t_hit, hit_ijk = self._ray_cast(cam, target)
+            _, hit_ijk = self._ray_cast(cam, target)
             if hit_ijk is None:
                 continue
 
-            if (hit_ijk not in self._seen) and (hit_ijk not in seen_this_call):
-                self._seen.add(hit_ijk)
-                seen_this_call.add(hit_ijk)
-                new_seen += 1
+            if (hit_ijk not in self._seen) and (hit_ijk not in potential_new):
+                potential_new.add(hit_ijk)
 
+        # commit to the map if seen   
+        if commit and potential_new:
+            before = len(self._seen)
+            self._seen.update(potential_new)
+            if len(self._seen) > before:
+                self._needs_rescore = True
+
+        new_seen = len(potential_new)
         return new_seen
 
     def _rebuild_kdtree(self):
