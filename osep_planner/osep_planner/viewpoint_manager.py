@@ -13,6 +13,7 @@ class Viewpoint:
     score: float = 0.0
     visited: bool = False
     valid: bool = True
+    no_gain: bool = False
     u_coeff: np.ndarray | None = None
 
 class ViewpointManager:
@@ -32,6 +33,9 @@ class ViewpointManager:
 
     def get_viewpoints(self) -> list:
         return [vp for vp in self.viewpoints.values() if vp.valid]
+
+    def get_n_visited(self) -> int:
+        return len([vp for vp in self.viewpoints.values() if vp.visited])
 
     def mark_visited(self, vptid: int) -> None:
         # Should propagate into occ_map... 
@@ -365,6 +369,9 @@ class ViewpointManager:
         except Exception:
             return
         
+        if vp.score == 0.0:
+            vp.no_gain = True
+
     @staticmethod
     def _yaw_to_face(dir: np.ndarray, tgt: np.ndarray) -> float:
         # Yaw value to face target tgt from camera dir

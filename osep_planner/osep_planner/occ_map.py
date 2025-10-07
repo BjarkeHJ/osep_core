@@ -144,7 +144,7 @@ class OCCMap:
             if (hit_ijk not in self._seen) and (hit_ijk not in potential_new):
                 potential_new.add(hit_ijk)
 
-        # commit to the map if seen   
+        # commit to the map if seen - Used when viewpoint reached by uav
         if commit and potential_new:
             before = len(self._seen)
             self._seen.update(potential_new)
@@ -165,10 +165,6 @@ class OCCMap:
         self._insert_batches_since_rebuild = 0
     
     def _ray_cast(self, p0: np.ndarray, p1: np.ndarray):
-        """
-        Returns (t_hit, (ix,iy,iz)) where t_hit in [0,1] is the param along p0->p1
-        at which we ENTER the first occupied voxel. Returns (None, None) if no hit.
-        """
         v0 = p0 * self.inv_voxel
         v1 = p1 * self.inv_voxel
 
@@ -212,7 +208,7 @@ class OCCMap:
                 tMaxZ += invz
             
             if (ix, iy, iz) in self._occ:
-                return float(min(max(t, 0.0), 1.0)), (ix, iy, iz)
+                return float(min(max(t, 0.0), 1.0)), (ix, iy, iz) # hit 0/1, parameter along direction
 
             steps += 1
         return None, None

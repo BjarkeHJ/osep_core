@@ -4,7 +4,7 @@ import numpy as np
 from dataclasses import dataclass
 from scipy.spatial import cKDTree as KDTree
 from scipy.sparse import csr_matrix as csr
-from scipy.sparse.csgraph import minimum_spanning_tree as mst
+from scipy.sparse.csgraph import connected_components
 
 # State Containers
 @dataclass
@@ -17,7 +17,7 @@ class Vertex:
     last_update: int # when this was last updated
 
 class SkeletonState:
-    def __init__(self, search_radius=3.0, update_th = 1.0):
+    def __init__(self, search_radius=3.0, update_th = 2.0):
         self.skelver: dict[int, Vertex] = {}
         self.adjacency: np.ndarray = np.array([])
         self.branches: dict[int, np.ndarray] = {}
@@ -38,12 +38,17 @@ class SkeletonState:
 
         self._deleted_vids: list[int] = []
 
+        self._adjacency_vids = None
+
     def get_skeleton(self) -> np.ndarray:
         if not self.skelver:
             return np.empty((0, 4), dtype=np.float64)
         vids = sorted(self.skelver.keys())
         rows = [[vid, *self.skelver[vid].pos] for vid in vids]
         return np.array(rows, dtype=np.float64)
+
+    def get_adjacency_and_vids(self):
+        return self.adjacency, getattr(self, "_adjacency_vids", None)
 
     def get_deleted_vids(self) -> list[int]:
         return self._deleted_vids
@@ -86,12 +91,10 @@ class SkeletonState:
                 vid_new = self._create_vertex(p, seg)
                 touched_vids.add(vid_new)
 
-            # self._prune_unseen(touched_vids)
             self._deleted_vids = self._prune_unseen(touched_vids)
             self._post_update_branches()
             self._update_adjacency()
             self._set_vertex_type()
-            # self._invalidate_index()
             return
 
         # For each point, get ALL candidate vertex indices within r
@@ -131,12 +134,10 @@ class SkeletonState:
                 vid_new = self._create_vertex(p, segs_in[i])
                 touched_vids.add(vid_new)
 
-        # self._prune_unseen(touched_vids)
         self._deleted_vids = self._prune_unseen(touched_vids)
         self._post_update_branches()
         self._update_adjacency()
         self._set_vertex_type()
-        # self._invalidate_index()
 
         print(f"Number of segments: {len(self.branch_ids)}")
         print(f"Branch IDs: {self.branch_ids}")
@@ -187,8 +188,19 @@ class SkeletonState:
             return
         vids = np.array(sorted(self.skelver.keys()), dtype=np.int32)
         segs = np.array([self.skelver[int(vid)].seg for vid in vids], dtype=np.int32)
-        self.branch_ids, inverse = np.unique(segs, return_inverse=True)
-        self.branches = {int(seg): vids[inverse == i] for i, seg in enumerate(self.branch_ids)}
+        unique_segs, inverse = np.unique(segs, return_inverse=True)
+
+        branches_clean = {}
+        valid_branch_ids = []
+        for i, seg in enumerate(unique_segs):
+            segs_vids = vids[inverse == i]
+            if segs_vids.size == 0:
+                continue # skip empty branhces
+            branches_clean[int(seg)] = segs_vids
+            valid_branch_ids.append(int(seg))
+
+        self.branches = branches_clean
+        self.branch_ids = np.array(valid_branch_ids, dtype=np.int32)
 
     def _prune_unseen(self, touched_vids: set[int]) -> list[int]:
         if not self.skelver:
@@ -205,7 +217,17 @@ class SkeletonState:
         # Mast to lower 24 bits
         return int(u & np.uint32(0x00FFFFFF))
 
+    def _quantize_rgb_key(self, key: int, step: int = 16) -> int:
+        r = (key >> 16) & 0xFF
+        g = (key >> 8) & 0xFF
+        b = (key) & 0xFF
+        rq = (r // step) * step
+        gq = (g // step) * step
+        bq = (b // step) * step
+        return (rq << 16) | (gq << 8) | bq
+
     def _seg_from_rgbkey(self, key: int) -> int:
+        key = self._quantize_rgb_key(key, step = 16)
         seg = self._color2seg.get(key, None)
         if seg is None:
             seg = self._next_seg_id
@@ -213,123 +235,96 @@ class SkeletonState:
             self._next_seg_id += 1
         return seg
 
-    def _update_adjacency(self, k_intra: int = 6) -> None:
+    def _update_adjacency(self) -> None:
         n = len(self.skelver)
         if n <= 1:
             self.adjacency = np.zeros((n,n), dtype=np.float64)
+            self._adjacency_vids = np.array(sorted(self.skelver.keys()), dtype=np.int32) if n == 1 else None
             return
-        
+
         self._build_search_index()
-        vids= self._id_cache
+        vids = self._id_cache
         P = self._pos_cache
         id2row = {int(v): i for i, v in enumerate(vids)}
-
-        segs_row = np.array([self.skelver[int(v)].seg for v in vids], dtype=np.int32)
-
+        
         W = np.zeros((n,n), dtype=np.float64)
 
         for seg in self.branch_ids:
             if seg < 0:
                 continue
-            seg_vids = self.branches.get(seg, None)
+            seg_vids = self.branches.get(int(seg))
             if seg_vids is None or seg_vids.size == 0:
                 continue
-
+            print(len(seg_vids))
             rows = np.array([id2row[int(v)] for v in seg_vids], dtype=np.int32)
             m = rows.size
             if m <= 1:
                 continue
-            
+
             Pseg = P[rows]
 
-            tree = KDTree(Pseg)
-            kk = min(k_intra + 1, m)
-            dist_k, idx_k = tree.query(Pseg, k=kk)
+            D = np.linalg.norm(Pseg[:, None, :] - Pseg[None, :, :], axis=2)
+            np.fill_diagonal(D, np.inf)
 
-            seen = set()
-            rL, cL, wL = [], [], []
+            nn = np.argmin(D, axis=1)
+            nn_dist = D[np.arange(m), nn]
+
             for a in range(m):
-                for t in range(1, kk):
-                    b = idx_k[a, t]
-                    if b == a:
-                        continue
-                    ii, jj = (a, b) if a < b else (b, a)
-                    if (ii, jj) in seen:
-                        continue
-                    seen.add((ii, jj))
-                    w = np.linalg.norm(Pseg[ii] - Pseg[jj])
-                    rL.append(ii)
-                    cL.append(jj)
-                    wL.append(w)
-
-            if not wL and m >= 2:
-                dist1, idx1 = tree.query(Pseg, k=2)
-                for a in range(m):
-                    b = int(idx1[a, 1])
-                    ii, jj = (a, b) if a < b else (b, a)
-                    if (ii, jj) in seen:
-                        continue
-                    seen.add((ii, jj))
-                    w = float(np.linalg.norm(Pseg[ii] - Pseg[jj]))
-                    rL.append(ii); cL.append(jj); wL.append(w)
-
-            if wL:
-                S_up = csr((wL, (rL, cL)), shape=(m, m))
-                S = S_up + S_up.T
-
-                T = mst(S)       # directed forest if disconnected
-                T = T + T.T      # undirected
-
-                ti, tj = T.nonzero()
-                for a, b in zip(ti, tj):
-                    if a < b:
-                        gi, gj = rows[a], rows[b]  # map back to global rows
-                        w = float(np.linalg.norm(P[gi] - P[gj]))
+                b = int(nn[a])
+                if b < 0 or b >= m:
+                    continue
+                if nn[b] == a and a < b:
+                    w = float(nn_dist[a])
+                    if w > 1e-9:
+                        gi = rows[a]
+                        gj = rows[b]
                         W[gi, gj] = W[gj, gi] = w
-        
-        deg_intra = (W > 0).sum(axis=1)
-        endpoints = np.where(deg_intra <= 1)[0]
 
-        r_cross = 1.25 * np.sqrt(self._search_r2)
-        ball = self._kdtree.query_ball_point(P, r=r_cross)
-
-        nearest_cross = -np.ones(n, dtype=np.int32)
-        nearest_dist = np.full(n, np.inf, dtype=np.float64)
-
-        for i in endpoints:
-            si = segs_row[i]
-            best_j, best_d = -1, np.inf
-            for j in ball[i]:
-                if j == i:
+            has_edge = (W[rows][:, rows] > 0).any(axis=1)
+            for a in range(m):
+                if has_edge[a]:
                     continue
-                if segs_row[j] == si:
+                b = int(nn[a])
+                if b < 0 or b >= m:
                     continue
+                w = float(nn_dist[a])
+                if w > 1e-9 and np.isfinite(w):
+                    gi = rows[a]
+                    gj = rows[b]
+                    W[gi, gj] = W[gj, gi] = w
 
-                d = np.linalg.norm(P[i] - P[j])
-                if (d < best_d):
-                    best_d = d
-                    best_j = j
-            if best_j >= 0:
-                nearest_cross[i] = best_j
-                nearest_dist[i] = best_d
-        
-        cross_used = np.zeros(n, dtype=np.int32)
-        for i in endpoints:
-            j = nearest_cross[i]
-            if j < 0:
-                continue
-            if nearest_cross[j] != i:
-                continue
-            
-            w = min(nearest_dist[i], nearest_dist[j]) if np.isfinite(nearest_dist[j]) else nearest_dist[i]
+            while True:
+                # Build boolean adjacency for this segment
+                Wsub = (W[rows][:, rows] > 0).astype(np.uint8)
+                n_comp, labels = connected_components(csr(Wsub), directed=False)
+                if n_comp <= 1:
+                    break
 
-            if 0.0 < w <= r_cross:
-                W[i,j] = W[j,i] = w
-                cross_used[i] += 1
-                cross_used[j] += 1
+                # For all pairs of different components, find the closest pair (u,v)
+                best = (np.inf, None, None)
+                for ci in range(n_comp):
+                    Ai = np.where(labels == ci)[0]
+                    for cj in range(ci + 1, n_comp):
+                        Aj = np.where(labels == cj)[0]
+                        # Use the distance matrix to find the minimal inter-component edge
+                        # D has inf on diagonal; these are distinct sets, so it's safe
+                        Dij = D[np.ix_(Ai, Aj)]
+                        k = np.argmin(Dij)
+                        di, dj = divmod(int(k), Dij.shape[1])
+                        dmin = float(Dij[di, dj])
+                        if np.isfinite(dmin) and dmin < best[0]:
+                            best = (dmin, int(Ai[di]), int(Aj[dj]))
 
-        W = np.minimum(W, W.T)
-        self.adjacency = W
+                dmin, u, v = best
+                if not np.isfinite(dmin):
+                    # degenerate case (all inf) — bail out
+                    break
+                gi, gj = rows[u], rows[v]
+                W[gi, gj] = W[gj, gi] = dmin
+                # loop continues until n_comp == 1
+
+        self._adjacency_vids = vids.copy()
+        self.adjacency = np.minimum(W, W.T)
 
     def _set_vertex_type(self):
         if self.adjacency.size == 0:
@@ -348,7 +343,6 @@ class SkeletonState:
             elif d == 2: # branch
                 v.type = 2
             elif d > 2: # junction
-                print("Juntion found!")
                 v.type = 3
             else: 
                 v.type = 0            
