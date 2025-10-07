@@ -141,7 +141,6 @@ class SkeletonState:
 
         print(f"Number of segments: {len(self.branch_ids)}")
         print(f"Branch IDs: {self.branch_ids}")
-        print(f"Adjacency Matrix Size: {self.adjacency.shape}")
 
     def _create_vertex(self, p: np.ndarray, seg: int) -> int:
         vid = self._next_id
@@ -236,9 +235,11 @@ class SkeletonState:
         return seg
 
     def _update_adjacency(self) -> None:
+        from scipy.sparse.csgraph import connected_components
+
         n = len(self.skelver)
         if n <= 1:
-            self.adjacency = np.zeros((n,n), dtype=np.float64)
+            self.adjacency = np.zeros((n, n), dtype=np.float64)
             self._adjacency_vids = np.array(sorted(self.skelver.keys()), dtype=np.int32) if n == 1 else None
             return
 
@@ -246,8 +247,8 @@ class SkeletonState:
         vids = self._id_cache
         P = self._pos_cache
         id2row = {int(v): i for i, v in enumerate(vids)}
-        
-        W = np.zeros((n,n), dtype=np.float64)
+
+        W = np.zeros((n, n), dtype=np.float64)
 
         for seg in self.branch_ids:
             if seg < 0:
@@ -255,73 +256,67 @@ class SkeletonState:
             seg_vids = self.branches.get(int(seg))
             if seg_vids is None or seg_vids.size == 0:
                 continue
-            print(len(seg_vids))
+            
             rows = np.array([id2row[int(v)] for v in seg_vids], dtype=np.int32)
             m = rows.size
             if m <= 1:
                 continue
 
             Pseg = P[rows]
-
             D = np.linalg.norm(Pseg[:, None, :] - Pseg[None, :, :], axis=2)
             np.fill_diagonal(D, np.inf)
 
-            nn = np.argmin(D, axis=1)
-            nn_dist = D[np.arange(m), nn]
-
-            for a in range(m):
-                b = int(nn[a])
-                if b < 0 or b >= m:
-                    continue
-                if nn[b] == a and a < b:
-                    w = float(nn_dist[a])
-                    if w > 1e-9:
-                        gi = rows[a]
-                        gj = rows[b]
-                        W[gi, gj] = W[gj, gi] = w
+            a = np.arange(m, dtype=np.int32)
+            nn = np.argmin(D, axis=1).astype(np.int32)
+            mnn_mask = (nn[nn] == a) & (a < nn)
+            ai, bi = a[mnn_mask], nn[mnn_mask]
+            if ai.size:
+                d = D[ai, bi]
+                Wi, Wj = rows[ai], rows[bi]
+                W[Wi, Wj] = d
+                W[Wj, Wi] = d
 
             has_edge = (W[rows][:, rows] > 0).any(axis=1)
-            for a in range(m):
-                if has_edge[a]:
-                    continue
-                b = int(nn[a])
-                if b < 0 or b >= m:
-                    continue
-                w = float(nn_dist[a])
-                if w > 1e-9 and np.isfinite(w):
-                    gi = rows[a]
-                    gj = rows[b]
-                    W[gi, gj] = W[gj, gi] = w
+            iso = ~has_edge
+            if iso.any():
+                ai = np.where(iso)[0]
+                bi = nn[ai]
+                d = D[ai, bi]
+                good = np.isfinite(d) & (d > 0.0)
+                if np.any(good):
+                    ai, bi, d = ai[good], bi[good], d[good]
+                    Wi, Wj = rows[ai], rows[bi]
+                    cur = W[Wi, Wj]
+                    upd = (cur == 0.0) | (d < cur)
+                    if np.any(upd):
+                        Wi, Wj, d = Wi[upd], Wj[upd], d[upd]
+                        W[Wi, Wj] = d
+                        W[Wj, Wi] = d
 
-            while True:
-                # Build boolean adjacency for this segment
-                Wsub = (W[rows][:, rows] > 0).astype(np.uint8)
-                n_comp, labels = connected_components(csr(Wsub), directed=False)
+            # stitch components with a safety cap of (m-1) additions
+            stitches = 0
+            max_stitches = max(0, m - 1)
+            while stitches < max_stitches:
+                sub = (W[rows][:, rows] > 0).astype(np.uint8)
+                n_comp, labels = connected_components(csr(sub), directed=False)
                 if n_comp <= 1:
                     break
 
-                # For all pairs of different components, find the closest pair (u,v)
-                best = (np.inf, None, None)
-                for ci in range(n_comp):
-                    Ai = np.where(labels == ci)[0]
-                    for cj in range(ci + 1, n_comp):
-                        Aj = np.where(labels == cj)[0]
-                        # Use the distance matrix to find the minimal inter-component edge
-                        # D has inf on diagonal; these are distinct sets, so it's safe
-                        Dij = D[np.ix_(Ai, Aj)]
-                        k = np.argmin(Dij)
-                        di, dj = divmod(int(k), Dij.shape[1])
-                        dmin = float(Dij[di, dj])
-                        if np.isfinite(dmin) and dmin < best[0]:
-                            best = (dmin, int(Ai[di]), int(Aj[dj]))
-
-                dmin, u, v = best
-                if not np.isfinite(dmin):
-                    # degenerate case (all inf) — bail out
+                M = D.copy()
+                M[labels[:, None] == labels[None, :]] = np.inf  # mask intra-comp
+                k = int(np.argmin(M))
+                u, v = divmod(k, m)
+                d = M[u, v]
+                if not np.isfinite(d):
+                    # nothing left to connect across components
                     break
+
                 gi, gj = rows[u], rows[v]
-                W[gi, gj] = W[gj, gi] = dmin
-                # loop continues until n_comp == 1
+                W[gi, gj] = d
+                W[gj, gi] = d
+                stitches += 1
+                if stitches == max_stitches: 
+                    print("stitch cap hit", int(seg), m)
 
         self._adjacency_vids = vids.copy()
         self.adjacency = np.minimum(W, W.T)

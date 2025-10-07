@@ -346,6 +346,8 @@ class PlannerNode(Node):
         self.skel.update_skeleton(xyz, rgb)
         self.publish_edge_markers() # Publishes edge connection between skeleton vertices for visualization...
 
+        print(f"Skeleton Version: {self.skel.current_version()}")
+
         s = self.skel.get_size()
         print(f"Skeleton Size: {s}")
         
