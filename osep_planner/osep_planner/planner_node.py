@@ -164,7 +164,6 @@ class PlannerNode(Node):
         pa.header.frame_id = self.global_frame
         pa.header.stamp = self.get_clock().now().to_msg()
 
-        # vpts = list(self.vpman.viewpoints.values())
         vpts = self.vpman.get_viewpoints() # return only valid viewpoints
 
         for vp in vpts:
