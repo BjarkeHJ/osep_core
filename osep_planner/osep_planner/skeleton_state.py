@@ -237,6 +237,7 @@ class SkeletonState:
         """
         Build adjacency matrix by connecting each point in each branch to its k nearest neighbors.
         Edge points (endpoints) are only connected to their single closest neighbor.
+        Ensures no point is connected to the same neighbor twice (strict chain/branch behavior).
         Args:
             k (int): Number of neighbors to connect for each non-endpoint (default: 2)
         """
@@ -262,34 +263,34 @@ class SkeletonState:
                 continue
             Pseg = P[rows]
             tree = KDTree(Pseg)
-            # Find k+1 neighbors for all points (including self)
             dists, idxs = tree.query(Pseg, k=min(k+1, m))
-            # For each point, compute sum of distances to k nearest neighbors (excluding self)
             sum_dists = dists[:, 1:k+1].sum(axis=1)
-            # Endpoints: those with largest and smallest sum of distances (or just the two extremes)
             if m > 2:
                 endpoint_indices = [int(np.argmin(sum_dists)), int(np.argmax(sum_dists))]
             else:
                 endpoint_indices = list(range(m))
+            added_edges = set()
             for i in range(m):
                 ni = rows[i]
                 if i in endpoint_indices:
-                    # Only connect to single closest neighbor (not self)
                     j = idxs[i, 1]
                     nj = rows[j]
                     d = dists[i, 1]
-                    if ni != nj and (W[ni, nj] == 0.0 or d < W[ni, nj]):
+                    edge = tuple(sorted((ni, nj)))
+                    if ni != nj and edge not in added_edges:
                         W[ni, nj] = d
                         W[nj, ni] = d
+                        added_edges.add(edge)
                 else:
-                    # Connect to k nearest neighbors (not self)
                     for jidx in range(1, min(k+1, m)):
                         j = idxs[i, jidx]
                         nj = rows[j]
                         d = dists[i, jidx]
-                        if ni != nj and (W[ni, nj] == 0.0 or d < W[ni, nj]):
+                        edge = tuple(sorted((ni, nj)))
+                        if ni != nj and edge not in added_edges:
                             W[ni, nj] = d
                             W[nj, ni] = d
+                            added_edges.add(edge)
         self._adjacency_vids = vids.copy()
         self.adjacency = np.minimum(W, W.T)
 

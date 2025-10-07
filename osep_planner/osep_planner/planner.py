@@ -23,7 +23,7 @@ class PathPlanner:
         self.w_score = 1.0
 
         self.w_dist = 1.5
-        self.w_pen = 10.0
+        self.w_pen = 7.0
         self.w_turn = 1.0
 
         self.c_same_vert = 0.0
@@ -105,7 +105,7 @@ class PathPlanner:
         # Fetch viewpoint that are: VALID, NOT VISITED and HAS GAIN
         # vpts = [(vptid, vp) for vptid, vp in self.vpman.viewpoints.items() 
         #         if vp and vp.valid and not getattr(vp, "visited", False) and not getattr(vp, "no_gain", False)]
-        
+
         vpts = [(vptid, vp) for vptid, vp in self.vpman.viewpoints.items() 
                 if vp and vp.valid and not getattr(vp, "visited", False)]
         if not vpts:
