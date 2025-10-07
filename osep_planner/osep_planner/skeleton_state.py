@@ -235,8 +235,6 @@ class SkeletonState:
         return seg
 
     def _update_adjacency(self) -> None:
-        from scipy.sparse.csgraph import connected_components
-
         n = len(self.skelver)
         if n <= 1:
             self.adjacency = np.zeros((n, n), dtype=np.float64)

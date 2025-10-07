@@ -85,8 +85,8 @@ class PlannerNode(Node):
         
         self._adjusted: bool = True
         self._init_mode: bool = True
-        self._init_points = [np.array([0.0, 0.0, 100.0], dtype=np.float32), 
-                             np.array([120.0, 0.0, 130.0], dtype=np.float32)]
+        self._init_points = [np.array([0.0, 0.0, 110.0], dtype=np.float32), 
+                             np.array([120.0, 0.0, 140.0], dtype=np.float32)]
 
         self.prev_dist_to_tgt = np.inf
         self.track_count = 0

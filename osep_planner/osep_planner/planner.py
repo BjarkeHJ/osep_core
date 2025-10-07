@@ -20,21 +20,22 @@ class PathPlanner:
         self._max_horizon = max_horizon
         self._start = -1
 
-        self.w_score = 2.0
+        self.w_score = 1.0
+
         self.w_dist = 1.5
-        self.w_pen = 1.0
-        self.w_turn = 0.5
+        self.w_pen = 10.0
+        self.w_turn = 1.0
 
         self.c_same_vert = 0.0
-        self.c_adj_vert = 0.1
-        self.c_same_branch = 0.3
+        self.c_adj_vert = 0.05
+        self.c_same_branch = 0.5
         self.c_others = 2.0
 
         self._next_exec_idx = 0
         self._lock_ahead = 1
         self._replan_cooldown_ticks = 10
         self._replan_cooldown = 0
-        self._prefer_old_margin = 0.5 # 15% increase needed
+        self._prefer_old_margin = 0.5 # 50% increase needed
 
     @staticmethod
     def _norm_scores(raw_scores: np.ndarray) -> np.ndarray:
@@ -66,7 +67,8 @@ class PathPlanner:
         if n < 1e-8:
             return 0.0
         v /= n
-        return 0.5 * (1.0 - float(np.dot(v_last, v)))
+        p = (0.5 * (1.0 - float(np.dot(v_last, v))))**2
+        return p
 
     def _decay_cooldown(self):
         if self._replan_cooldown > 0:
@@ -206,12 +208,6 @@ class PathPlanner:
             self._replan_cooldown = self._replan_cooldown_ticks
             self._refine_path()
             committed = True
-
-        # for id in chosen_ids:
-        #     self.path.viewpoints.append(id)
-        # self.path.path_len = len(self.path.viewpoints)
-        # self._replan_cooldown = self._replan_cooldown_ticks
-        # self._refine_path()
 
         return committed
 
