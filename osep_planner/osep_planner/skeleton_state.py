@@ -4,7 +4,6 @@ import numpy as np
 from dataclasses import dataclass
 from scipy.spatial import cKDTree as KDTree
 from scipy.sparse import csr_matrix as csr
-from scipy.sparse.csgraph import connected_components
 
 # State Containers
 @dataclass
@@ -234,88 +233,63 @@ class SkeletonState:
             self._next_seg_id += 1
         return seg
 
-    def _update_adjacency(self) -> None:
+    def _update_adjacency(self, k: int = 2) -> None:
+        """
+        Build adjacency matrix by connecting each point in each branch to its k nearest neighbors.
+        Edge points (endpoints) are only connected to their single closest neighbor.
+        Args:
+            k (int): Number of neighbors to connect for each non-endpoint (default: 2)
+        """
         n = len(self.skelver)
         if n <= 1:
             self.adjacency = np.zeros((n, n), dtype=np.float64)
             self._adjacency_vids = np.array(sorted(self.skelver.keys()), dtype=np.int32) if n == 1 else None
             return
-
         self._build_search_index()
         vids = self._id_cache
         P = self._pos_cache
         id2row = {int(v): i for i, v in enumerate(vids)}
-
         W = np.zeros((n, n), dtype=np.float64)
-
         for seg in self.branch_ids:
             if seg < 0:
                 continue
             seg_vids = self.branches.get(int(seg))
             if seg_vids is None or seg_vids.size == 0:
                 continue
-            
             rows = np.array([id2row[int(v)] for v in seg_vids], dtype=np.int32)
             m = rows.size
             if m <= 1:
                 continue
-
             Pseg = P[rows]
-            D = np.linalg.norm(Pseg[:, None, :] - Pseg[None, :, :], axis=2)
-            np.fill_diagonal(D, np.inf)
-
-            a = np.arange(m, dtype=np.int32)
-            nn = np.argmin(D, axis=1).astype(np.int32)
-            mnn_mask = (nn[nn] == a) & (a < nn)
-            ai, bi = a[mnn_mask], nn[mnn_mask]
-            if ai.size:
-                d = D[ai, bi]
-                Wi, Wj = rows[ai], rows[bi]
-                W[Wi, Wj] = d
-                W[Wj, Wi] = d
-
-            has_edge = (W[rows][:, rows] > 0).any(axis=1)
-            iso = ~has_edge
-            if iso.any():
-                ai = np.where(iso)[0]
-                bi = nn[ai]
-                d = D[ai, bi]
-                good = np.isfinite(d) & (d > 0.0)
-                if np.any(good):
-                    ai, bi, d = ai[good], bi[good], d[good]
-                    Wi, Wj = rows[ai], rows[bi]
-                    cur = W[Wi, Wj]
-                    upd = (cur == 0.0) | (d < cur)
-                    if np.any(upd):
-                        Wi, Wj, d = Wi[upd], Wj[upd], d[upd]
-                        W[Wi, Wj] = d
-                        W[Wj, Wi] = d
-
-            # stitch components with a safety cap of (m-1) additions
-            stitches = 0
-            max_stitches = max(0, m - 1)
-            while stitches < max_stitches:
-                sub = (W[rows][:, rows] > 0).astype(np.uint8)
-                n_comp, labels = connected_components(csr(sub), directed=False)
-                if n_comp <= 1:
-                    break
-
-                M = D.copy()
-                M[labels[:, None] == labels[None, :]] = np.inf  # mask intra-comp
-                k = int(np.argmin(M))
-                u, v = divmod(k, m)
-                d = M[u, v]
-                if not np.isfinite(d):
-                    # nothing left to connect across components
-                    break
-
-                gi, gj = rows[u], rows[v]
-                W[gi, gj] = d
-                W[gj, gi] = d
-                stitches += 1
-                if stitches == max_stitches: 
-                    print("stitch cap hit", int(seg), m)
-
+            tree = KDTree(Pseg)
+            # Find k+1 neighbors for all points (including self)
+            dists, idxs = tree.query(Pseg, k=min(k+1, m))
+            # For each point, compute sum of distances to k nearest neighbors (excluding self)
+            sum_dists = dists[:, 1:k+1].sum(axis=1)
+            # Endpoints: those with largest and smallest sum of distances (or just the two extremes)
+            if m > 2:
+                endpoint_indices = [int(np.argmin(sum_dists)), int(np.argmax(sum_dists))]
+            else:
+                endpoint_indices = list(range(m))
+            for i in range(m):
+                ni = rows[i]
+                if i in endpoint_indices:
+                    # Only connect to single closest neighbor (not self)
+                    j = idxs[i, 1]
+                    nj = rows[j]
+                    d = dists[i, 1]
+                    if ni != nj and (W[ni, nj] == 0.0 or d < W[ni, nj]):
+                        W[ni, nj] = d
+                        W[nj, ni] = d
+                else:
+                    # Connect to k nearest neighbors (not self)
+                    for jidx in range(1, min(k+1, m)):
+                        j = idxs[i, jidx]
+                        nj = rows[j]
+                        d = dists[i, jidx]
+                        if ni != nj and (W[ni, nj] == 0.0 or d < W[ni, nj]):
+                            W[ni, nj] = d
+                            W[nj, ni] = d
         self._adjacency_vids = vids.copy()
         self.adjacency = np.minimum(W, W.T)
 

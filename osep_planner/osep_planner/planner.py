@@ -103,8 +103,11 @@ class PathPlanner:
         slots_left = self._max_horizon - len(prefix_ids)
 
         # Fetch viewpoint that are: VALID, NOT VISITED and HAS GAIN
+        # vpts = [(vptid, vp) for vptid, vp in self.vpman.viewpoints.items() 
+        #         if vp and vp.valid and not getattr(vp, "visited", False) and not getattr(vp, "no_gain", False)]
+        
         vpts = [(vptid, vp) for vptid, vp in self.vpman.viewpoints.items() 
-                if vp and vp.valid and not getattr(vp, "visited", False) and not getattr(vp, "no_gain", False)]
+                if vp and vp.valid and not getattr(vp, "visited", False)]
         if not vpts:
             return
         
