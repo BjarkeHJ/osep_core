@@ -48,8 +48,8 @@ class PlannerNode(Node):
 
         self.declare_parameter('safe_distance', 15.0)
         self.declare_parameter('voxel_size', 1.0)
-        self.declare_parameter('camera_hfov', 60.0)
-        self.declare_parameter('camera_vfov', 30.0)
+        self.declare_parameter('camera_hfov', 50.0)
+        self.declare_parameter('camera_vfov', 40.0)
         self.declare_parameter('camera_range', 20.0)
         self.declare_parameter('reach_distance', 2.0)
         safe_distance = float(self.get_parameter('safe_distance').get_parameter_value().double_value)
@@ -59,12 +59,11 @@ class PlannerNode(Node):
         cam_range = float(self.get_parameter('camera_range').get_parameter_value().double_value)
         self.reach_distance = float(self.get_parameter('reach_distance').get_parameter_value().double_value)
 
-        # qos = rclpy.qos.QoSProfile(depth=10)
         qos = QoSProfile(
-            reliability=ReliabilityPolicy.RELIABLE,  # Matches AStarPlanner
-            durability=DurabilityPolicy.VOLATILE,  # Matches AStarPlanner
-            history=HistoryPolicy.KEEP_LAST,  # Matches AStarPlanner
-            depth=1,  # Matches AStarPlanner
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.VOLATILE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
         )
         self.skel_sub = self.create_subscription(PointCloud2, skeleton_topic, self.skeleton_callback, qos)
         self.map_sub = self.create_subscription(PointCloud2, map_topic, self.map_callback, qos)
@@ -82,12 +81,15 @@ class PlannerNode(Node):
         self.skel = SkeletonState()
         self.occ_map = OCCMap(voxel_size, cam_hfov, cam_vfov, cam_range)
         self.vpman = ViewpointManager(self.skel, self.occ_map, safe_distance)
-        self.planner = PathPlanner(self.skel, self.occ_map, self.vpman, self.drone_position, max_horizon=10)
+        self.planner = PathPlanner(self.skel, self.occ_map, self.vpman, self.drone_position, max_horizon=5)
         
         self._adjusted: bool = True
         self._init_mode: bool = True
         self._init_points = [np.array([0.0, 0.0, 100.0], dtype=np.float32), 
                              np.array([120.0, 0.0, 130.0], dtype=np.float32)]
+
+        self.prev_dist_to_tgt = np.inf
+        self.track_count = 0
 
         self.get_logger().info("PlannerNode Initialized")
 
@@ -111,11 +113,17 @@ class PlannerNode(Node):
     def publish_edge_markers(self):
         if not self.skel.skelver:
             return
-        adj = self.skel.adjacency
-        if adj is None or adj.size == 0:
+        # adj = self.skel.adjacency
+        v1 = self.skel.current_version()
+        adj, vids = self.skel.get_adjacency_and_vids()
+        v2 = self.skel.current_version()
+        if v1 != v2:
             return
 
-        vids = np.array(sorted(self.skel.skelver.keys()), dtype=np.int32)
+        if adj is None or adj.size == 0 or vids is None:
+            return
+
+        # vids = np.array(sorted(self.skel.skelver.keys()), dtype=np.int32)
         if adj.shape != (vids.size, vids.size):
             self.get_logger().warn(
                 f"Adjacency shape {adj.shape} does not match number of vertices {vids.size}"
@@ -156,7 +164,8 @@ class PlannerNode(Node):
         pa.header.frame_id = self.global_frame
         pa.header.stamp = self.get_clock().now().to_msg()
 
-        vpts = list(self.vpman.viewpoints.values())
+        # vpts = list(self.vpman.viewpoints.values())
+        vpts = self.vpman.get_viewpoints() # return only valid viewpoints
 
         for vp in vpts:
             if getattr(vp, "visited", False):
@@ -182,7 +191,7 @@ class PlannerNode(Node):
     def publish_path(self):
         if self.planner is None or self.planner.path is None:
             return
-        ids = self.planner.path.viewpoints
+        ids = list(self.planner.path.viewpoints)
         if not ids:
             return
         
@@ -209,6 +218,7 @@ class PlannerNode(Node):
             path.poses.append(ps)
         
         self.path_pub.publish(path)
+        self.get_logger().info(f"Published New Path - Path lenght: {len(path.poses)}")
     
     def publish_init_path(self):
         if not self._init_points:
@@ -269,7 +279,15 @@ class PlannerNode(Node):
             return True
         
         dist = float(np.linalg.norm(vp.pos.astype(np.float32) - self.drone_position.astype(np.float32)))
-        if dist <= self.reach_distance:
+        if dist > self.prev_dist_to_tgt:
+            self.track_count += 1
+            # self.prev_dist_to_tgt = dist
+        elif dist < self.reach_distance:
+            self.prev_dist_to_tgt = dist
+        
+        if self.track_count > 5:
+            self.track_count = 0
+            self.prev_dist_to_tgt = np.inf
             self.vpman.mark_visited(head_vptid)
             try:
                 newseen = self.occ_map.mark_visible_from(vp.pos, vp.yaw, commit=True)
@@ -281,7 +299,30 @@ class PlannerNode(Node):
             self.planner.path.viewpoints.pop(0)
             self.planner.path.path_len = len(self.planner.path.viewpoints)
             self.get_logger().info(f"Viewpoint Reached - New Voxels Seen: {newseen if newseen is not None else 'None'}\n Total seen voxels: {len(self.occ_map._seen)} / {len(self.occ_map._occ)}")
+            self.get_logger().info(f"Total seen voxels: {len(self.occ_map._seen)} / {len(self.occ_map._occ)}")
+            self.get_logger().info(f"Total visited viewpoints: {self.vpman.get_n_visited()} / {len(self.vpman.get_viewpoints())}")
             return True
+        
+        elif self.track_count > 0 and self.prev_dist_to_tgt > dist:
+            self.track_count = 0
+        else:
+            self.prev_dist_to_tgt = dist
+
+        # if dist <= self.reach_distance:
+        #     self.vpman.mark_visited(head_vptid)
+        #     try:
+        #         newseen = self.occ_map.mark_visible_from(vp.pos, vp.yaw, commit=True)
+        #     except Exception:
+        #         newseen = None
+        #         self.get_logger().warn(f"Could Not Mark Voxels Seen")
+        #         pass
+
+        #     self.planner.path.viewpoints.pop(0)
+        #     self.planner.path.path_len = len(self.planner.path.viewpoints)
+        #     self.get_logger().info(f"Viewpoint Reached - New Voxels Seen: {newseen if newseen is not None else 'None'}\n Total seen voxels: {len(self.occ_map._seen)} / {len(self.occ_map._occ)}")
+        #     self.get_logger().info(f"Total seen voxels: {len(self.occ_map._seen)} / {len(self.occ_map._occ)}")
+        #     self.get_logger().info(f"Total visited viewpoints: {self.vpman.get_n_visited()} / {len(self.vpman.get_viewpoints())}")
+        #     return True
         
         return False
 
@@ -300,7 +341,8 @@ class PlannerNode(Node):
         if xyz.size == 0:
             return
         
-        self.get_logger().info(f"Received cloud with shape: {xyz.shape}")
+        print(f"Received cloud with shape: {xyz.shape}")
+        
         self.skel.update_skeleton(xyz, rgb)
         self.publish_edge_markers() # Publishes edge connection between skeleton vertices for visualization...
 
@@ -395,26 +437,24 @@ class PlannerNode(Node):
             self._adjusted = True
 
         if not self._adjusted:
+            self.get_logger().warn("Waiting for adjusted Viewpoints")
             return # waiting for adjusted viewpoints
 
         self.planner.drone_pos = self.drone_position
         self.prune_current_path()
 
         try:
-            self.planner.generate_path()
+            committed = self.planner.generate_path()
         except Exception as ex:
             self.get_logger().warn(f"planner.generate_path() error: {ex}")
             return
         
-        if self.planner.path and self.planner.path.viewpoints:
+        if committed:
             self.publish_path()
             self._adjusted = False
-
+            
 def main(args=None):
     rclpy.init(args=args)
-    node = PlannerNode()
-    try:
-        rclpy.spin(node)
-    finally:
-        node.destroy_node()
-        rclpy.shutdown()
+    planner = PlannerNode()
+    rclpy.spin(planner)
+    planner.destroy_node()
